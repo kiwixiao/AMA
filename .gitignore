@@ -1,0 +1,55 @@
+# Data files
+*.csv
+*.pkl
+*.json
+*.stl
+
+# Results and output directories
+*_results/
+*_xyz_tables/
+*_xyz_tables_with_patches/
+VdotN/
+STLoutput/
+regional_cfd_data/
+
+# Generated reports and figures
+*.pdf
+*.png
+*.html
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Conda environments
+.conda/ 
