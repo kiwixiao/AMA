@@ -190,7 +190,6 @@ def validate_subject_files(subject_name: str, required_files: List[str] = None) 
     if required_files is None:
         required_files = [
             "flow_profile",
-            "flow_profile_smoothed", 
             "tracking_locations",
             "xyz_tables"
         ]
@@ -206,16 +205,7 @@ def validate_subject_files(subject_name: str, required_files: List[str] = None) 
         if not results["flow_profile"]:
             print(f"❌ Missing flow profile")
     
-    if "flow_profile_smoothed" in required_files:
-        base_subject = extract_base_subject(subject_name)
-        smoothed_candidates = [
-            f"{subject_name}FlowProfile_smoothed.csv",
-            f"{base_subject}FlowProfile_smoothed.csv"
-        ]
-        found_smoothed = any(Path(f).exists() for f in smoothed_candidates)
-        results["flow_profile_smoothed"] = found_smoothed
-        if not found_smoothed:
-            print(f"❌ Missing smoothed flow profile")
+    # Note: Smoothed flow profile is optional and generated automatically if needed
     
     # Check tracking locations
     if "tracking_locations" in required_files:
@@ -564,6 +554,47 @@ def preprocess_all_tables(xyz_files: List[Path], subject_name: str) -> List[Path
         output_file = output_dir / f"patched_{file_path.name}"
         add_patch_numbers_to_table(file_path, output_file)
         processed_files.append(output_file)
+    
+    return processed_files
+
+def preprocess_all_tables_parallel(xyz_files: List[Path], subject_name: str) -> List[Path]:
+    """
+    Add patch numbers to all surface tables using parallel processing.
+    Returns list of paths to processed files.
+    
+    Args:
+        xyz_files: List of paths to XYZ table files
+        subject_name: Name of the subject
+        
+    Returns:
+        List of paths to processed files with patch numbers
+    """
+    # If files are already patched (have patched_ prefix), just return them
+    if any(f.name.startswith('patched_') for f in xyz_files):
+        print("Using existing patched tables")
+        return xyz_files
+    
+    # Import parallel processing module
+    try:
+        from .parallel_csv_processing import process_csv_files_parallel, get_file_processing_stats
+    except ImportError:
+        print("⚠️  Parallel processing module not available, falling back to sequential processing")
+        return preprocess_all_tables(xyz_files, subject_name)
+    
+    # Get file statistics
+    stats = get_file_processing_stats(xyz_files)
+    print(f"\n📊 CSV Processing Statistics:")
+    print(f"   • Files to process: {stats['total_files']}")
+    print(f"   • Total data size: {stats['total_size_gb']:.1f} GB")
+    print(f"   • Average file size: {stats['avg_file_size_mb']:.1f} MB")
+    print(f"   • Estimated sequential time: {stats['estimated_time_sequential_min']:.1f} minutes")
+    
+    # Process files in parallel
+    processed_files = process_csv_files_parallel(xyz_files, subject_name)
+    
+    if not processed_files:
+        print("❌ Parallel processing failed, falling back to sequential processing")
+        return preprocess_all_tables(xyz_files, subject_name)
     
     return processed_files
 
