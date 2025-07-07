@@ -52,4 +52,13 @@ env/
 ENV/
 
 # Conda environments
-.conda/ 
+.conda/ # HDF5 cache files (large binary files)
+*.h5
+*_cfd_data.h5
+
+# Results directories (generated data)
+*_results/
+*_xyz_tables/
+*_xyz_tables_with_patches/
+STLoutput/
+VdotN/
