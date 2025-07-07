@@ -254,8 +254,22 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
     print(f"Properties tracked: {n_properties}")
     print(f"🔥 Using parallel processing for {n_timesteps} CSV files...")
     
-    # Get optimal process count
-    optimal_processes = min(mp.cpu_count(), n_timesteps, 16)  # Cap at 16 processes
+    # Get optimal process count with smart scaling
+    cpu_cores = mp.cpu_count()
+    memory_info = psutil.virtual_memory()
+    available_gb = memory_info.available / (1024**3)
+    
+    # Smart process cap based on system specs
+    if cpu_cores >= 64 and available_gb >= 64:
+        max_processes = 64  # High-end servers
+    elif cpu_cores >= 32 and available_gb >= 32:
+        max_processes = 32  # Mid-range servers  
+    elif cpu_cores >= 16 and available_gb >= 16:
+        max_processes = 24  # Modern workstations
+    else:
+        max_processes = 16  # Conservative default
+    
+    optimal_processes = min(cpu_cores, n_timesteps, max_processes)
     print(f"📊 Using {optimal_processes} parallel processes")
     
     # Create HDF5 file structure
@@ -418,8 +432,22 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
     batch_size = max(1, int((target_memory_gb * 1024) / memory_per_timestep_mb))
     batch_size = min(batch_size, n_timesteps)  # Don't exceed total files
     
-    # Get optimal process count
-    optimal_processes = min(mp.cpu_count(), batch_size, 16)  # Cap at 16 processes
+    # Get optimal process count with smart scaling
+    cpu_cores = mp.cpu_count()
+    memory_info = psutil.virtual_memory()
+    available_gb = memory_info.available / (1024**3)
+    
+    # Smart process cap based on system specs
+    if cpu_cores >= 64 and available_gb >= 64:
+        max_processes = 64  # High-end servers
+    elif cpu_cores >= 32 and available_gb >= 32:
+        max_processes = 32  # Mid-range servers  
+    elif cpu_cores >= 16 and available_gb >= 16:
+        max_processes = 24  # Modern workstations
+    else:
+        max_processes = 16  # Conservative default
+    
+    optimal_processes = min(cpu_cores, batch_size, max_processes)
     
     print(f"📊 Memory-safe processing plan:")
     print(f"   Available RAM: {available_gb:.1f} GB")

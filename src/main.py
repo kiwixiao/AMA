@@ -3742,9 +3742,12 @@ def main(overwrite_existing: bool = False,
         # Note: For now, we'll continue using CSV files for tracking
         # In the future, we can modify the tracking functions to use HDF5 directly
         
-        # Create interactive visualization of first time point
-        print("\nCreating interactive visualization...")
-        plot_3d_interactive_all_patches(xyz_files[0], tracking_locations, subject_name, interactive_dir)
+        # Create interactive visualization of first time point (only if CSV files available)
+        if xyz_files:
+            print("\nCreating interactive visualization...")
+            plot_3d_interactive_all_patches(xyz_files[0], tracking_locations, subject_name, interactive_dir)
+        else:
+            print("\nSkipping interactive visualization (using HDF5 cache, no CSV files loaded)")
         
         # Process each tracking point
         print("\nProcessing tracking points...")

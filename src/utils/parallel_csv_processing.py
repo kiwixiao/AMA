@@ -604,7 +604,17 @@ def get_optimal_process_count(file_size_mb: float = 600, available_memory_gb: fl
     cpu_limited_processes = max(1, int(cpu_count * 0.75))
     
     # Take the minimum to avoid overwhelming the system
-    optimal_processes = min(memory_limited_processes, cpu_limited_processes, 16)  # Cap at 16
+    # Smart process cap based on system specs
+    if cpu_count >= 64 and available_memory_gb >= 64:
+        max_processes = 64  # High-end servers
+    elif cpu_count >= 32 and available_memory_gb >= 32:
+        max_processes = 32  # Mid-range servers  
+    elif cpu_count >= 16 and available_memory_gb >= 16:
+        max_processes = 24  # Modern workstations
+    else:
+        max_processes = 16  # Conservative default
+    
+    optimal_processes = min(memory_limited_processes, cpu_limited_processes, max_processes)
     
     print(f"System resources detected:")
     print(f"  CPU cores: {cpu_count}")
