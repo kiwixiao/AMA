@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 from tqdm import tqdm
 import h5py
+import gc
+import psutil
 
-def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5') -> Dict:
+def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
     """
     Load all tables into a 3D array format and save as HDF5.
     If HDF5 file already exists, load from it instead of processing tables again.
@@ -23,8 +25,8 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
     Returns:
         Dictionary containing the loaded data and metadata
     """
-    # Check if HDF5 file already exists
-    if Path(save_path).exists():
+    # Check if HDF5 file already exists (unless forced to overwrite)
+    if Path(save_path).exists() and not overwrite_existing:
         print(f"\nFound existing data file: {save_path}")
         # Verify the file has the expected structure
         try:
@@ -37,6 +39,8 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
         except Exception as e:
             print(f"Error reading existing file: {e}")
             print("Will recreate the data file...")
+    elif Path(save_path).exists() and overwrite_existing:
+        print(f"\n🔄 Force rerun enabled - recreating HDF5 file: {save_path}")
     
     print("\nLoading all tables into 3D array format...")
     
@@ -59,22 +63,31 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
     
     # Create HDF5 file
     with h5py.File(save_path, 'w') as f:
-        # Create datasets
-        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float32')
-        times = f.create_dataset('times', (n_timesteps,), dtype='float32')
+        # Create datasets with appropriate data types
+        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
         
         # Store property names exactly as they appear in the raw table
-        f.attrs['properties'] = properties
+        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
         
         # Load all tables
         for i, xyz_file in enumerate(tqdm(xyz_files, desc="Loading tables")):
             df = pd.read_csv(xyz_file, low_memory=False)
-            table_num = int(str(xyz_file).split('_')[-1].split('.')[0])
-            times[i] = table_num * 0.001  # Convert to seconds
+            # Extract timestep using robust method (handles scientific notation, decimals, etc.)
+            from utils.file_processing import extract_timestep_from_filename
+            table_time = extract_timestep_from_filename(xyz_file) * 0.001  # Convert to seconds
+            times[i] = table_time
             
             # Store data for each property in the same order as the raw table
             for j, prop in enumerate(properties):
-                data[i, :, j] = df[prop].values
+                try:
+                    # Convert to numeric, handling any non-numeric values
+                    values = pd.to_numeric(df[prop], errors='coerce').fillna(0.0)
+                    data[i, :, j] = values.values
+                except Exception as e:
+                    print(f"Warning: Error converting column '{prop}' to numeric: {e}")
+                    # Fill with zeros if conversion fails
+                    data[i, :, j] = np.zeros(n_points)
     
     print(f"\nSaved 3D data to {save_path}")
     print("Properties preserved in the same order as raw table")
@@ -83,6 +96,7 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
 def filter_data_by_breathing_cycle(data_info: Dict, subject_name: str) -> Dict:
     """
     Filter the 3D data to include only points within clean breathing cycles.
+    Memory-safe version that uses chunked loading.
     
     Args:
         data_info: Dictionary containing the HDF5 file path and metadata
@@ -91,107 +105,14 @@ def filter_data_by_breathing_cycle(data_info: Dict, subject_name: str) -> Dict:
     Returns:
         dict: Updated data_info dictionary with filtered data path
     """
-    import h5py
-    import numpy as np
-    import pandas as pd
-    from pathlib import Path
-    
-    print("Filtering data based on breathing cycle...")
-    
-    # Load flow profile data
-    flow_data = pd.read_csv(f'{subject_name}FlowProfile.csv')
-    
-    # Get column names and identify time and flow columns
-    columns = flow_data.columns.tolist()
-    print(f"\nFlow profile columns: {columns}")
-    
-    # Try to identify time and flow columns
-    time_col = next((col for col in columns if 'time' in col.lower()), columns[0])
-    flow_col = next((col for col in columns if 'flow' in col.lower() or 'mass' in col.lower()), columns[1])
-    
-    print(f"Using columns: Time = '{time_col}', Flow = '{flow_col}'")
-    
-    # Convert time from seconds to milliseconds if needed
-    flow_times = flow_data[time_col].values
-    if 'time (s)' in columns:  # If time is in seconds, convert to ms
-        flow_times = flow_times * 1000
-        print("Converting time from seconds to milliseconds")
-    
-    flow_values = flow_data[flow_col].values
-    
-    # Find zero crossings to identify breathing cycles
-    zero_crossings = np.where(np.diff(np.signbit(flow_values)))[0]
-    
-    # Get the time points for zero crossings
-    cycle_times = flow_times[zero_crossings]
-    
-    print(f"\nFound {len(zero_crossings)} zero crossings")
-    print(f"Time range: {cycle_times[0]:.2f} ms to {cycle_times[-1]:.2f} ms")
-    
-    # Load original data
-    with h5py.File(data_info['file_path'], 'r') as f:
-        print("\nAvailable datasets in HDF5 file:", list(f.keys()))
-        
-        # Load times and data
-        times = f['times'][:]
-        data = f['data'][:]
-        
-        # Check if properties exist
-        properties = None
-        if 'properties' in f:
-            properties = f['properties'][:]
-            print("Loaded properties from HDF5 file")
-        else:
-            print("No properties found in HDF5 file")
-    
-    # Find indices of times within the clean breathing cycle
-    valid_indices = []
-    
-    # Use the entire time range between first and last zero crossing
-    start_time = cycle_times[0]
-    end_time = cycle_times[-1]
-    
-    # Find indices of times within this range
-    valid_indices = np.where((times >= start_time) & (times <= end_time))[0]
-    
-    if len(valid_indices) == 0:
-        print("Warning: No valid breathing cycles found!")
-        return data_info
-    
-    print(f"\nFound {len(valid_indices)} timesteps within breathing cycle")
-    print(f"Time range: {times[valid_indices[0]]:.2f} ms to {times[valid_indices[-1]]:.2f} ms")
-    
-    # Create filtered dataset
-    filtered_file_path = Path(f'{subject_name}_cfd_data_filtered.h5')
-    with h5py.File(filtered_file_path, 'w') as f:
-        # Save filtered data
-        f.create_dataset('times', data=times[valid_indices])
-        f.create_dataset('data', data=data[valid_indices])
-        
-        # Save properties if they exist
-        if properties is not None:
-            f.create_dataset('properties', data=properties)
-        
-        # Add metadata about filtering
-        f.attrs['num_original_timesteps'] = len(times)
-        f.attrs['num_filtered_timesteps'] = len(valid_indices)
-        f.attrs['filtering_description'] = 'Data filtered to include only complete breathing cycles'
-        f.attrs['subject_name'] = subject_name
-    
-    print(f"\nOriginal timesteps: {len(times)}")
-    print(f"Filtered timesteps: {len(valid_indices)}")
-    print(f"Filtered data saved to: {filtered_file_path}")
-    
-    # Return updated data info
-    return {
-        'file_path': str(filtered_file_path),
-        'times': times[valid_indices],
-        'properties': properties
-    }
+    # Use the new memory-safe chunked version
+    from utils.parallel_csv_processing import filter_data_by_breathing_cycle_chunked
+    return filter_data_by_breathing_cycle_chunked(data_info, subject_name)
 
 def track_point_movement_3d(data_info: Dict, patch_number: int, face_index: int) -> Dict:
     """
     Track the movement of a specific point through time.
+    Uses auto-selection to pick the best method (multi-core parallel for large datasets).
     
     Args:
         data_info: Dictionary containing the HDF5 file path and metadata
@@ -201,138 +122,35 @@ def track_point_movement_3d(data_info: Dict, patch_number: int, face_index: int)
     Returns:
         dict: Dictionary containing trajectory information
     """
-    import h5py
-    import numpy as np
+    # Use the new auto-selection functions that pick the best method
+    from utils.parallel_csv_processing import auto_select_hdf5_point_tracking_method
     
-    print(f"\nTracking point: Patch {patch_number}, Face {face_index}")
+    # Get the HDF5 file path
+    hdf5_file_path = data_info['file_path']
     
-    with h5py.File(data_info['file_path'], 'r') as f:
-        data = f['data'][:]
-        times = f['times'][:]
-        
-        # Get properties from HDF5 file
-        if 'properties' in f.attrs:
-            properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
-            print(f"\nAvailable properties: {properties}")
-        else:
-            print("Error: No properties found in HDF5 file")
-            return {}
-        
-        # Find indices for required properties
-        try:
-            # Look for coordinate columns - try both Position[X] and X formats
-            x_idx = next(i for i, p in enumerate(properties) if p in ['Position[X] (m)', 'X (m)'])
-            y_idx = next(i for i, p in enumerate(properties) if p in ['Position[Y] (m)', 'Y (m)'])
-            z_idx = next(i for i, p in enumerate(properties) if p in ['Position[Z] (m)', 'Z (m)'])
-            
-            # Look for face and patch columns
-            face_idx = next(i for i, p in enumerate(properties) if p == 'Face Index')
-            patch_idx = next(i for i, p in enumerate(properties) if p == 'Patch Number')
-            
-            # Look for additional properties
-            pressure_idx = next((i for i, p in enumerate(properties) if p == 'Total Pressure (Pa)'), None)
-            velocity_idx = next((i for i, p in enumerate(properties) if p == 'Velocity: Magnitude (m/s)'), None)
-            vdotn_idx = next((i for i, p in enumerate(properties) if p == 'VdotN'), None)
-            
-            print("\nFound property indices:")
-            print(f"  Coordinates: X={properties[x_idx]}, Y={properties[y_idx]}, Z={properties[z_idx]}")
-            print(f"  Face Index: {properties[face_idx]}, Patch Number: {properties[patch_idx]}")
-            if pressure_idx is not None:
-                print(f"  Pressure: {properties[pressure_idx]}")
-            if velocity_idx is not None:
-                print(f"  Velocity: {properties[velocity_idx]}")
-            if vdotn_idx is not None:
-                print(f"  VdotN: {properties[vdotn_idx]}")
-            
-        except StopIteration as e:
-            print(f"Error: Could not find all required properties in the data")
-            print(f"Available properties: {properties}")
-            return {}
+    # Use auto-selection to get the best tracking method
+    trajectory_data = auto_select_hdf5_point_tracking_method(hdf5_file_path, patch_number, face_index)
     
-    # Find points matching patch and face
-    trajectory = []
-    velocities = []
-    accelerations = []
-    pressures = []
-    vdotn_values = []
-    
-    prev_pos = None
-    prev_vel = None
-    prev_time = None
-    
-    for t_idx, time in enumerate(times):
-        # Find the point with matching patch and face
-        matches = np.where(
-            (data[t_idx, :, patch_idx] == patch_number) & 
-            (data[t_idx, :, face_idx] == face_index)
-        )[0]
+    # Convert to the expected format
+    if trajectory_data:
+        times = [d['time'] for d in trajectory_data]
+        positions = [(d['x'], d['y'], d['z']) for d in trajectory_data]
+        pressures = [d.get('pressure', 0.0) for d in trajectory_data]
+        velocities = [d.get('velocity', 0.0) for d in trajectory_data]
+        vdotn_values = [d.get('vdotn', 0.0) for d in trajectory_data]
         
-        if len(matches) == 0:
-            print(f"Warning: Point not found at time {time}")
-            continue
-        elif len(matches) > 1:
-            print(f"Warning: Multiple matches found at time {time}, using first")
-        
-        point_idx = matches[0]
-        
-        # Get position
-        pos = data[t_idx, point_idx, [x_idx, y_idx, z_idx]]
-        trajectory.append((time, pos))
-        
-        # Get pressure if available
-        if pressure_idx is not None:
-            pressure = data[t_idx, point_idx, pressure_idx]
-            pressures.append((time, pressure))
-        
-        # Get VdotN if available
-        if vdotn_idx is not None:
-            vdotn = data[t_idx, point_idx, vdotn_idx]
-            vdotn_values.append((time, vdotn))
-        
-        # Calculate velocity if we have a previous position
-        if prev_pos is not None and prev_time is not None:
-            dt = time - prev_time
-            if dt > 0:
-                # Calculate velocity
-                vel = (pos - prev_pos) / dt
-                velocities.append((time, vel))
-                
-                # Calculate acceleration if we have a previous velocity
-                if prev_vel is not None:
-                    acc = (vel - prev_vel) / dt
-                    accelerations.append((time, acc))
-                
-                prev_vel = vel
-        
-        prev_pos = pos
-        prev_time = time
-    
-    if not trajectory:
-        print("Warning: No trajectory points found!")
+        return {
+            'times': np.array(times),
+            'positions': np.array(positions),
+            'total_pressures': np.array(pressures),
+            'velocities': np.array(velocities),
+            'vdotn': np.array(vdotn_values),
+            'table_numbers': [int(t * 1000) for t in times],
+            'accelerations': np.array([]),  # Will be calculated later
+            'dp_dt': np.array([])  # Will be calculated later
+        }
+    else:
         return {}
-    
-    # Convert lists to numpy arrays
-    times = np.array([t for t, _ in trajectory])
-    positions = np.array([p for _, p in trajectory])
-    velocities = np.array([v for _, v in velocities]) if velocities else np.array([])
-    accelerations = np.array([a for _, a in accelerations]) if accelerations else np.array([])
-    pressures = np.array([p for _, p in pressures]) if pressures else np.array([])
-    vdotn_values = np.array([v for _, v in vdotn_values]) if vdotn_values else np.array([])
-    
-    result = {
-        'times': times,
-        'positions': positions,
-        'velocities': velocities,
-        'accelerations': accelerations
-    }
-    
-    # Add optional data if available
-    if len(pressures) > 0:
-        result['pressures'] = pressures
-    if len(vdotn_values) > 0:
-        result['vdotn'] = vdotn_values
-    
-    return result
 
 def calculate_derived_quantities(trajectory: Dict) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -382,4 +200,333 @@ def save_trajectory_data(trajectory: Dict, velocity: np.ndarray, vdotn: np.ndarr
         'Acceleration (m/s²)': acceleration,
         'dP/dt (Pa/s)': dp_dt
     })
-    df.to_csv(output_file, index=False) 
+    df.to_csv(output_file, index=False)
+
+def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
+    """
+    PARALLEL VERSION: Load all tables into a 3D array format and save as HDF5.
+    Uses multiprocessing to read CSV files in parallel for dramatic speedup.
+    
+    Args:
+        xyz_files: List of paths to XYZ table files with patch numbers
+        save_path: Path to save the HDF5 file
+        
+    Returns:
+        Dictionary containing the loaded data and metadata
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import time
+    
+    # Check if HDF5 file already exists
+    if Path(save_path).exists():
+        print(f"\nFound existing data file: {save_path}")
+        # Verify the file has the expected structure
+        try:
+            with h5py.File(save_path, 'r') as f:
+                if all(key in f for key in ['data', 'times']) and 'properties' in f.attrs:
+                    print("File structure verified. Loading existing data...")
+                    return {'file_path': save_path, 'properties': f.attrs['properties']}
+                else:
+                    print("Existing file has incorrect structure. Will recreate...")
+        except Exception as e:
+            print(f"Error reading existing file: {e}")
+            print("Will recreate the data file...")
+    
+    print("\n🚀 Loading all tables into 3D array format (PARALLEL)...")
+    
+    # IMPORTANT: xyz_files is already sorted in natural chronological order by main.py
+    # The parallel processing preserves this order by using the original file index
+    print("📋 Files are pre-sorted in natural chronological order for time-series consistency")
+    
+    # First read one table to get dimensions and structure
+    first_df = pd.read_csv(xyz_files[0], low_memory=False)
+    n_points = len(first_df)
+    n_timesteps = len(xyz_files)
+    
+    # Use all columns from the raw table
+    properties = first_df.columns.tolist()
+    n_properties = len(properties)
+    
+    print(f"Data dimensions:")
+    print(f"Time steps: {n_timesteps}")
+    print(f"Points per step: {n_points}")
+    print(f"Properties tracked: {n_properties}")
+    print(f"🔥 Using parallel processing for {n_timesteps} CSV files...")
+    
+    # Get optimal process count
+    optimal_processes = min(mp.cpu_count(), n_timesteps, 16)  # Cap at 16 processes
+    print(f"📊 Using {optimal_processes} parallel processes")
+    
+    # Create HDF5 file structure
+    with h5py.File(save_path, 'w') as f:
+        # Create datasets with appropriate data types
+        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
+        
+        # Store property names exactly as they appear in the raw table
+        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
+        
+        # Process CSV files in parallel
+        start_time = time.time()
+        
+        # Prepare arguments for parallel processing
+        file_args = [(i, xyz_file, properties) for i, xyz_file in enumerate(xyz_files)]
+        
+        # Use parallel processing with proper progress tracking
+        completed_files = 0
+        
+        with ProcessPoolExecutor(max_workers=optimal_processes) as executor:
+            # Submit all tasks
+            future_to_index = {executor.submit(process_single_csv_file, args): args[0] for args in file_args}
+            
+            # Process completed tasks
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    table_data, table_time = future.result()
+                    
+                    # Write data to HDF5
+                    data[index] = table_data
+                    times[index] = table_time
+                    
+                    completed_files += 1
+                    if completed_files % 50 == 0 or completed_files == n_timesteps:
+                        progress = (completed_files / n_timesteps) * 100
+                        elapsed = time.time() - start_time
+                        print(f"  Progress: {progress:.1f}% ({completed_files}/{n_timesteps} files, {elapsed:.1f}s)")
+                        
+                except Exception as e:
+                    print(f"Error processing file {index}: {e}")
+                    # Fill with zeros if processing fails
+                    data[index] = np.zeros((n_points, n_properties))
+                    times[index] = 0.0
+    
+    total_time = time.time() - start_time
+    print(f"\n✅ PARALLEL conversion completed in {total_time:.1f} seconds")
+    print(f"📈 Performance: {n_timesteps/total_time:.1f} files/second")
+    print(f"💾 Saved 3D data to {save_path}")
+    
+    return {'file_path': save_path, 'properties': properties}
+
+def process_single_csv_file(args):
+    """
+    Process a single CSV file for parallel loading.
+    
+    Args:
+        args: Tuple of (index, file_path, properties)
+        
+    Returns:
+        Tuple of (processed_data, time_value)
+    """
+    index, xyz_file, properties = args
+    
+    try:
+        # Read CSV file
+        df = pd.read_csv(xyz_file, low_memory=False)
+        
+        # Extract timestep using robust method (handles scientific notation, decimals, etc.)
+        from utils.file_processing import extract_timestep_from_filename
+        table_time = extract_timestep_from_filename(xyz_file) * 0.001  # Convert to seconds
+        
+        # Process data for each property
+        n_points = len(df)
+        n_properties = len(properties)
+        table_data = np.zeros((n_points, n_properties))
+        
+        for j, prop in enumerate(properties):
+            try:
+                # Convert to numeric, handling any non-numeric values
+                values = pd.to_numeric(df[prop], errors='coerce').fillna(0.0)
+                table_data[:, j] = values.values
+            except Exception as e:
+                print(f"Warning: Error converting column '{prop}' in file {index}: {e}")
+                # Fill with zeros if conversion fails
+                table_data[:, j] = np.zeros(n_points)
+        
+        return table_data, table_time
+        
+    except Exception as e:
+        print(f"Error processing file {xyz_file}: {e}")
+        # Return zeros if file processing fails
+        return np.zeros((n_points, n_properties)), 0.0
+
+def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
+    """
+    MEMORY-SAFE PARALLEL VERSION: For very large datasets that might not fit in memory.
+    Processes CSV files in parallel chunks and writes to HDF5 incrementally.
+    
+    Args:
+        xyz_files: List of paths to XYZ table files with patch numbers
+        save_path: Path to save the HDF5 file
+        
+    Returns:
+        Dictionary containing the loaded data and metadata
+    """
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import time
+    import psutil
+    
+    # Check if HDF5 file already exists (unless forced to overwrite)
+    if Path(save_path).exists() and not overwrite_existing:
+        print(f"\nFound existing data file: {save_path}")
+        # Verify the file has the expected structure
+        try:
+            with h5py.File(save_path, 'r') as f:
+                if all(key in f for key in ['data', 'times']) and 'properties' in f.attrs:
+                    print("File structure verified. Loading existing data...")
+                    return {'file_path': save_path, 'properties': f.attrs['properties']}
+                else:
+                    print("Existing file has incorrect structure. Will recreate...")
+        except Exception as e:
+            print(f"Error reading existing file: {e}")
+            print("Will recreate the data file...")
+    elif Path(save_path).exists() and overwrite_existing:
+        print(f"\n🔄 Force rerun enabled - recreating HDF5 file: {save_path}")
+    
+    print("\n🚀 Loading all tables into 3D array format (MEMORY-SAFE PARALLEL)...")
+    
+    # IMPORTANT: xyz_files is already sorted in natural chronological order by main.py
+    # The parallel processing preserves this order by using the original file index
+    print("📋 Files are pre-sorted in natural chronological order for time-series consistency")
+    
+    # First read one table to get dimensions and structure
+    first_df = pd.read_csv(xyz_files[0], low_memory=False)
+    n_points = len(first_df)
+    n_timesteps = len(xyz_files)
+    
+    # Use all columns from the raw table
+    properties = first_df.columns.tolist()
+    n_properties = len(properties)
+    
+    # Calculate memory usage per timestep
+    memory_per_timestep_mb = (n_points * n_properties * 8) / (1024 * 1024)  # 8 bytes per float64
+    
+    print(f"Data dimensions:")
+    print(f"Time steps: {n_timesteps}")
+    print(f"Points per step: {n_points}")
+    print(f"Properties tracked: {n_properties}")
+    print(f"Memory per timestep: {memory_per_timestep_mb:.1f} MB")
+    
+    # Get system memory info
+    memory_info = psutil.virtual_memory()
+    available_gb = memory_info.available / (1024**3)
+    
+    # Calculate optimal batch size (use 25% of available memory)
+    target_memory_gb = available_gb * 0.25
+    batch_size = max(1, int((target_memory_gb * 1024) / memory_per_timestep_mb))
+    batch_size = min(batch_size, n_timesteps)  # Don't exceed total files
+    
+    # Get optimal process count
+    optimal_processes = min(mp.cpu_count(), batch_size, 16)  # Cap at 16 processes
+    
+    print(f"📊 Memory-safe processing plan:")
+    print(f"   Available RAM: {available_gb:.1f} GB")
+    print(f"   Batch size: {batch_size} files")
+    print(f"   Parallel processes: {optimal_processes}")
+    print(f"   Number of batches: {(n_timesteps + batch_size - 1) // batch_size}")
+    
+    # Create HDF5 file structure
+    with h5py.File(save_path, 'w') as f:
+        # Create datasets with appropriate data types
+        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
+        
+        # Store property names exactly as they appear in the raw table
+        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
+        
+        # Process CSV files in parallel batches
+        start_time = time.time()
+        total_processed = 0
+        
+        for batch_start in range(0, n_timesteps, batch_size):
+            batch_end = min(batch_start + batch_size, n_timesteps)
+            batch_files = xyz_files[batch_start:batch_end]
+            
+            print(f"\n🔄 Processing batch {batch_start//batch_size + 1}: files {batch_start}-{batch_end-1}")
+            
+            # Prepare arguments for this batch
+            file_args = [(i, xyz_file, properties) for i, xyz_file in enumerate(batch_files)]
+            
+            # Process batch in parallel
+            with ProcessPoolExecutor(max_workers=optimal_processes) as executor:
+                # Submit all tasks in this batch
+                future_to_index = {executor.submit(process_single_csv_file, args): args[0] for args in file_args}
+                
+                # Process completed tasks
+                for future in as_completed(future_to_index):
+                    local_index = future_to_index[future]
+                    global_index = batch_start + local_index
+                    
+                    try:
+                        table_data, table_time = future.result()
+                        
+                        # Write data to HDF5
+                        data[global_index] = table_data
+                        times[global_index] = table_time
+                        
+                        total_processed += 1
+                        
+                    except Exception as e:
+                        print(f"Error processing file {global_index}: {e}")
+                        # Fill with zeros if processing fails
+                        data[global_index] = np.zeros((n_points, n_properties))
+                        times[global_index] = 0.0
+                        total_processed += 1
+            
+            # Progress update
+            progress = (total_processed / n_timesteps) * 100
+            elapsed = time.time() - start_time
+            print(f"  ✅ Batch completed: {progress:.1f}% total ({total_processed}/{n_timesteps} files, {elapsed:.1f}s)")
+            
+            # Force garbage collection between batches
+            gc.collect()
+    
+    total_time = time.time() - start_time
+    print(f"\n✅ MEMORY-SAFE PARALLEL conversion completed in {total_time:.1f} seconds")
+    print(f"📈 Performance: {n_timesteps/total_time:.1f} files/second")
+    print(f"💾 Saved 3D data to {save_path}")
+    
+    return {'file_path': save_path, 'properties': properties}
+
+def auto_select_csv_to_hdf5_method(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
+    """
+    Automatically select the best CSV to HDF5 conversion method based on dataset size.
+    
+    Args:
+        xyz_files: List of paths to XYZ table files with patch numbers
+        save_path: Path to save the HDF5 file
+        
+    Returns:
+        Dictionary containing the loaded data and metadata
+    """
+    import psutil
+    
+    n_timesteps = len(xyz_files)
+    
+    # Get system memory info
+    memory_info = psutil.virtual_memory()
+    available_gb = memory_info.available / (1024**3)
+    
+    # Estimate memory requirements
+    first_df = pd.read_csv(xyz_files[0], low_memory=False)
+    n_points = len(first_df)
+    n_properties = len(first_df.columns)
+    
+    # Memory per timestep in GB
+    memory_per_timestep_gb = (n_points * n_properties * 8) / (1024**3)
+    total_memory_needed_gb = memory_per_timestep_gb * n_timesteps
+    
+    print(f"📊 CSV to HDF5 conversion analysis:")
+    print(f"   Files to process: {n_timesteps}")
+    print(f"   Available RAM: {available_gb:.1f} GB")
+    print(f"   Estimated memory needed: {total_memory_needed_gb:.1f} GB")
+    
+    # Select method based on memory requirements
+    if total_memory_needed_gb > available_gb * 0.5:  # If needs more than 50% of available RAM
+        print("🛡️  Using MEMORY-SAFE PARALLEL method (large dataset)")
+        return load_tables_to_3d_array_memory_safe_parallel(xyz_files, save_path, overwrite_existing)
+    else:
+        print("🚀 Using STANDARD PARALLEL method (dataset fits in memory)")
+        return load_tables_to_3d_array_parallel(xyz_files, save_path, overwrite_existing) 

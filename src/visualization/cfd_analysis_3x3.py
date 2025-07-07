@@ -77,15 +77,24 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     
     norm = plt.Normalize(0, normalized_time_max)
     transition_norm = normalized_inhale_exhale / normalized_time_max
+    
+    # Ensure color points are in increasing order
+    # Clamp transition points to valid range [0, 1]
+    transition_norm = max(0.1, min(0.9, transition_norm))  # Keep transition between 10% and 90%
+    
     colors = [
         (0, 'darkblue'),
-        (transition_norm - 0.05, 'blue'),
-        (transition_norm - 0.005, 'lightblue'),
+        (max(0.01, transition_norm - 0.05), 'blue'),
+        (max(0.02, transition_norm - 0.005), 'lightblue'),
         (transition_norm, 'white'),
-        (transition_norm + 0.005, 'pink'),
-        (transition_norm + 0.05, 'red'),
+        (min(0.98, transition_norm + 0.005), 'pink'),
+        (min(0.99, transition_norm + 0.05), 'red'),
         (1, 'darkred')
     ]
+    
+    # Sort colors by position to ensure increasing order
+    colors = sorted(colors, key=lambda x: x[0])
+    
     custom_cmap = LinearSegmentedColormap.from_list('custom_diverging', colors)
     
     # Create the 3x3 grid of plots

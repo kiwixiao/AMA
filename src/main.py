@@ -46,7 +46,14 @@ from utils.parallel_csv_processing import (
     track_fixed_patch_region_parallel,
     track_point_hdf5_parallel,
     track_fixed_patch_region_hdf5_parallel,
-    find_initial_region_points_hdf5
+    auto_select_hdf5_tracking_method,
+    auto_select_hdf5_point_tracking_method,
+    track_fixed_patch_region_hdf5_memory_safe_multicore,
+    track_point_hdf5_memory_safe_multicore,
+    track_fixed_patch_region_hdf5_optimized_multicore,
+    track_fixed_patch_region_hdf5_optimized_index_lookup,
+    auto_select_optimized_hdf5_tracking_method,
+    find_initial_region_points_hdf5_safe
 )
 
 # Import surface plots function with fallback
@@ -768,7 +775,7 @@ def process_all_combinations(subject_name, tracking_locations):
     
     return combination_files
 
-def create_airway_surface_velocity_plot(df, subject_name, description, patch_number, face_index, pdf):
+def create_airway_surface_velocity_plot(df, subject_name, description, patch_number, face_index, pdf, smoothing_window=20):
     """Create a plot of airway surface velocity over time."""
     # Compute resultant velocity
     velocity = np.sqrt(
@@ -790,7 +797,7 @@ def create_airway_surface_velocity_plot(df, subject_name, description, patch_num
         flow_profile = pd.read_csv(f'{base_subject}FlowProfile.csv')
         
         # Apply smoothing in memory
-        def apply_smoothing(data, window_size=20):
+        def apply_smoothing(data, window_size=smoothing_window):
             if len(data) < window_size:
                 return data.copy()
             smoothed = data.copy()
@@ -2670,7 +2677,7 @@ def find_zero_crossings(times, values):
     
     return crossing_times
 
-def create_airway_surface_analysis_plot(df, subject_name, description, patch_number, face_index, pdf, output_dir=None):
+def create_airway_surface_analysis_plot(df, subject_name, description, patch_number, face_index, pdf, output_dir=None, smoothing_window=20):
     """Create a plot showing analysis for a single point, including pressure vs velocity/acceleration relationships."""
     # Convert DataFrame to trajectory_data structure
     trajectory_data = []
@@ -2730,7 +2737,7 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
     flow_profile = pd.read_csv(f'{base_subject}FlowProfile.csv')
     
     # Apply smoothing in memory
-    def apply_smoothing(data, window_size=20):
+    def apply_smoothing(data, window_size=smoothing_window):
         if len(data) < window_size:
             return data.copy()
         smoothed = data.copy()
@@ -2754,8 +2761,8 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
     times = np.array([p['time'] for p in trajectory_data])
     pressures = np.array([p['pressure'] for p in trajectory_data])
             
-            # Calculate smoothed pressure using moving average
-    window_size = 100
+            # Calculate smoothed pressure using moving average  
+    window_size = smoothing_window * 5  # Use 5x smoothing window for pressure (was 100 with default 20)
     window = np.bartlett(window_size)
     window = window / window.sum()
     pad_width = window_size // 2
@@ -3299,7 +3306,8 @@ def main(overwrite_existing: bool = False,
          raw_surface: bool = False,
          surface_timestep: int = 1,
          interactive_selector: bool = False,
-         selector_timestep: int = 100):
+         selector_timestep: int = 100,
+         smoothing_window: int = 20):
     """
     Main function to process CFD data and generate analysis plots.
     """
@@ -3604,7 +3612,7 @@ def main(overwrite_existing: bool = False,
             print("Using cached data for fast tracking (skipping CSV processing)...")
             
             # Load the existing HDF5 data info
-            from data_processing.trajectory import load_tables_to_3d_array
+            from data_processing.trajectory import auto_select_csv_to_hdf5_method
             data_info = {'file_path': hdf5_file_path, 'properties': None}
             
             # We still need to get the CSV file list for compatibility with current tracking functions
@@ -3720,15 +3728,15 @@ def main(overwrite_existing: bool = False,
                 print("Error: No files found within breathing cycle bounds!")
                 return
             
-            # STEP 3: Convert CSV files to HDF5 format for faster processing
-            print(f"\n🚀 Converting CSV files to HDF5 format for faster processing...")
-            from data_processing.trajectory import load_tables_to_3d_array
+            # STEP 3: Convert CSV files to HDF5 format for faster processing (PARALLEL)
+            print(f"\n🚀 Converting CSV files to HDF5 format for faster processing (PARALLEL)...")
+            from data_processing.trajectory import auto_select_csv_to_hdf5_method
             
             # Create HDF5 file name based on subject
             hdf5_file_path = f"{subject_name}_cfd_data.h5"
             
-            # Convert to HDF5 (will use existing file if it exists)
-            data_info = load_tables_to_3d_array(xyz_files, hdf5_file_path)
+            # Convert to HDF5 using optimized parallel method (respects --forcererun flag)
+            data_info = auto_select_csv_to_hdf5_method(xyz_files, hdf5_file_path, overwrite_existing)
             print(f"✅ HDF5 data ready: {data_info['file_path']}")
         
         # Note: For now, we'll continue using CSV files for tracking
@@ -3783,7 +3791,7 @@ def main(overwrite_existing: bool = False,
                     if Path(hdf5_file_path).exists():
                         print(f"  🚀 Using HDF5 cache for spatial analysis: {hdf5_file_path}")
                         print(f"  Finding patch points using HDF5 data...")
-                        patch_point_pairs = find_initial_region_points_hdf5(hdf5_file_path, patch_number, face_index, radius, normal_angle_threshold)
+                        patch_point_pairs = find_initial_region_points_hdf5_safe(hdf5_file_path, patch_number, face_index, radius, normal_angle_threshold)
                     else:
                         print(f"  📁 Using CSV files for spatial analysis (HDF5 not available)")
                         if len(xyz_files) == 0:
@@ -3803,7 +3811,7 @@ def main(overwrite_existing: bool = False,
                     # Use HDF5 or CSV based on availability
                     if Path(hdf5_file_path).exists():
                         print(f"  🚀 Using HDF5 cache for patch tracking (10-20x faster)")
-                        patch_data = track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
+                        patch_data = auto_select_hdf5_tracking_method(hdf5_file_path, patch_point_pairs)
                     else:
                         print(f"  📁 Using CSV files for patch tracking")
                         patch_data = track_fixed_patch_region_parallel(xyz_files, patch_point_pairs)
@@ -4150,7 +4158,7 @@ def main(overwrite_existing: bool = False,
                 print(f"\nPlotting data for {description} (single point)")
                 df = pd.read_csv(data_file)
                 create_airway_surface_analysis_plot(df, subject_name, description, 
-                                                   patch_number, face_index, pdf, output_dir)
+                                                   patch_number, face_index, pdf, output_dir, smoothing_window)
             else:
                 print(f"Warning: No single point data file found for {description}")
             
@@ -4170,7 +4178,7 @@ def main(overwrite_existing: bool = False,
                         print(f"Plotting data for {patch_description}")
                         df = pd.read_csv(patch_data_file)
                         create_airway_surface_analysis_plot(df, subject_name, patch_description, 
-                                                           patch_number, face_index, pdf, output_dir)
+                                                           patch_number, face_index, pdf, output_dir, smoothing_window)
                     else:
                         print(f"Warning: No patch data file found for {patch_description}")
         
@@ -4538,6 +4546,8 @@ Examples:
                       help='Launch interactive 3D point selector for manual landmark selection')
     parser.add_argument('--selector-timestep', type=int, default=100,
                       help='Time step for interactive selector (default: 100 = 0.1s)')
+    parser.add_argument('--smoothing-window', type=int, default=20,
+                      help='Smoothing window size for plot data (default: 20 time steps)')
     args = parser.parse_args()
     
     # Handle list subjects command
@@ -4574,4 +4584,5 @@ Examples:
          raw_surface=getattr(args, 'raw_surface', False),
          surface_timestep=args.surface_timestep,
          interactive_selector=getattr(args, 'interactive_selector', False),
-         selector_timestep=args.selector_timestep) 
+         selector_timestep=args.selector_timestep,
+         smoothing_window=getattr(args, 'smoothing_window', 20)) 
