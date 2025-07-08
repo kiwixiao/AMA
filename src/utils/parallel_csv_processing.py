@@ -29,14 +29,70 @@ import gc
 
 
 def get_system_memory_info():
-    """Get detailed system memory information."""
+    """Get detailed system memory information with cross-platform compatibility."""
+    import platform
+    import psutil
+    
+    # Get basic memory info
     memory = psutil.virtual_memory()
+    
+    # Detect platform for platform-specific handling
+    system_platform = platform.system().lower()
+    architecture = platform.machine().lower()
+    
+    # Platform-specific memory adjustments
+    available_gb = memory.available / (1024**3)
+    total_gb = memory.total / (1024**3)
+    used_gb = memory.used / (1024**3)
+    
+    if system_platform == 'darwin':  # macOS
+        # macOS memory compression can make "available" misleading
+        # Use a more conservative approach on macOS
+        # Account for memory pressure and compression
+        try:
+            # Try to get more accurate available memory on macOS
+            import subprocess
+            vm_stat = subprocess.check_output(['vm_stat']).decode('utf-8')
+            # Parse vm_stat for more accurate memory info if needed
+            # For now, use psutil but add platform info
+            platform_note = "macOS (with memory compression)"
+        except:
+            platform_note = "macOS"
+            
+        # macOS tends to use more memory for system caches
+        # Be slightly more conservative
+        if available_gb > 16:
+            available_gb *= 0.95  # 5% more conservative on macOS
+            
+    elif system_platform == 'linux':  # Linux
+        # Linux memory reporting is generally more accurate
+        # But we should account for buffer/cache differences
+        platform_note = "Linux"
+        
+        # On Linux, we can be more aggressive with available memory
+        # since memory.available already accounts for buffers/cache
+        # No adjustment needed - psutil handles this well on Linux
+        
+    else:  # Windows or other
+        platform_note = f"{system_platform}"
+    
+    # Additional system info for debugging
+    cpu_info = {
+        'logical_cores': psutil.cpu_count(logical=True),
+        'physical_cores': psutil.cpu_count(logical=False)
+    }
+    
     return {
-        'total_gb': memory.total / (1024**3),
-        'available_gb': memory.available / (1024**3),
-        'used_gb': memory.used / (1024**3),
+        'total_gb': total_gb,
+        'available_gb': available_gb,
+        'used_gb': used_gb,
         'percent_used': memory.percent,
-        'free_gb': memory.free / (1024**3)
+        'free_gb': memory.free / (1024**3),
+        'platform': system_platform,
+        'architecture': architecture,
+        'platform_note': platform_note,
+        'cpu_logical_cores': cpu_info['logical_cores'],
+        'cpu_physical_cores': cpu_info['physical_cores']
     }
 
 
@@ -55,12 +111,17 @@ def calculate_safe_chunk_size(hdf5_file_path: str, target_memory_gb: float = Non
     try:
         import h5py
         import psutil
+        import multiprocessing as mp
         
         # Get system memory info
         memory_info = get_system_memory_info()
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            data_shape = f['data'].shape  # (n_times, n_points, n_properties)
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                data_shape = f['cfd_data'].shape  # (n_times, n_points, n_properties)
+            else:
+                data_shape = f['data'].shape  # (n_times, n_points, n_properties)
             n_times, n_points, n_properties = data_shape
             
             # Calculate memory per time step (in GB)
@@ -69,18 +130,79 @@ def calculate_safe_chunk_size(hdf5_file_path: str, target_memory_gb: float = Non
             
             # Auto-detect target memory if not specified
             if target_memory_gb is None:
-                # Use percentage of available memory based on system size
+                # Pure percentage-based approach with platform-specific optimizations
                 available_gb = memory_info['available_gb']
-                if available_gb > 32:  # High-end system
-                    target_memory_gb = min(8.0, available_gb * 0.4)
-                elif available_gb > 16:  # Mid-range system
-                    target_memory_gb = min(4.0, available_gb * 0.3)
-                elif available_gb > 8:   # Low-end system
-                    target_memory_gb = min(2.0, available_gb * 0.25)
-                else:  # Very low memory system
-                    target_memory_gb = min(1.0, available_gb * 0.2)
+                platform = memory_info['platform']
+                
+                # Base memory percentage and safety factor by available memory
+                if available_gb > 128:  # Massive HPC/server systems (128GB+)
+                    base_memory_percentage = 0.6   # Use 60% of available memory
+                    base_safety_factor = 0.95      # Very aggressive safety factor
+                elif available_gb > 64:   # Very high-end systems (64-128GB)
+                    base_memory_percentage = 0.55  # Use 55% of available memory
+                    base_safety_factor = 0.9       # Aggressive safety factor
+                elif available_gb > 32:   # High-end systems (32-64GB)
+                    base_memory_percentage = 0.5   # Use 50% of available memory
+                    base_safety_factor = 0.85      # Less conservative safety factor
+                elif available_gb > 16:   # Mid-range systems (16-32GB)
+                    base_memory_percentage = 0.45  # Use 45% of available memory
+                    base_safety_factor = 0.8       # Moderately conservative
+                elif available_gb > 8:    # Low-end systems (8-16GB)
+                    base_memory_percentage = 0.4   # Use 40% of available memory
+                    base_safety_factor = 0.75      # Conservative
+                else:  # Very low memory systems (<8GB)
+                    base_memory_percentage = 0.3   # Use 30% of available memory
+                    base_safety_factor = 0.7       # Very conservative
+                
+                # Platform-specific adjustments
+                if platform == 'darwin':  # macOS
+                    # macOS has memory compression and different memory management
+                    # Be slightly more conservative due to memory pressure handling
+                    memory_percentage = base_memory_percentage * 0.95
+                    safety_factor = base_safety_factor * 0.98
+                    platform_adjustment = "macOS: -5% memory, -2% safety (compression aware)"
+                elif platform == 'linux':  # Linux
+                    # Linux memory reporting is accurate, can be more aggressive
+                    memory_percentage = base_memory_percentage * 1.05  # +5% more aggressive
+                    safety_factor = base_safety_factor
+                    platform_adjustment = "Linux: +5% memory (accurate reporting)"
+                else:  # Windows or other
+                    memory_percentage = base_memory_percentage
+                    safety_factor = base_safety_factor
+                    platform_adjustment = f"{platform}: default settings"
+                
+                # IMPORTANT: Multiprocessing Pool Reality Check
+                # Pool doesn't load all chunks simultaneously - only 2-4 processes active at once
+                cpu_cores = memory_info['cpu_logical_cores']
+                optimal_processes = min(max(1, int(cpu_cores * 0.75)), 24)  # Match get_optimal_process_count logic
+                
+                # Realistic concurrent chunk loading (Pool internal queue behavior)
+                concurrent_chunks = min(4, optimal_processes)  # Typically 2-4 chunks loaded simultaneously
+                
+                # Adjust memory percentage to account for realistic concurrent loading
+                if concurrent_chunks < optimal_processes:
+                    # We can be more aggressive since not all processes load simultaneously
+                    concurrency_factor = optimal_processes / concurrent_chunks
+                    memory_percentage = min(0.8, memory_percentage * concurrency_factor)  # Cap at 80%
+                    platform_adjustment += f" + Concurrency boost: {concurrency_factor:.1f}x (Pool reality)"
+                
+                # Calculate target memory: Available × Percentage × Safety Factor
+                target_memory_gb = available_gb * memory_percentage
+            else:
+                # User specified target, use adaptive safety factor
+                available_gb = memory_info['available_gb']
+                memory_percentage = target_memory_gb / available_gb  # Calculate percentage for logging
+                if available_gb > 128:
+                    safety_factor = 0.95
+                elif available_gb > 64:
+                    safety_factor = 0.9
+                elif available_gb > 32:
+                    safety_factor = 0.85
+                elif available_gb > 16:
+                    safety_factor = 0.8
+                else:
+                    safety_factor = 0.75
             
-            # Apply safety factor
             safe_target_memory = target_memory_gb * safety_factor
             
             # Calculate optimal chunk size
@@ -91,44 +213,95 @@ def calculate_safe_chunk_size(hdf5_file_path: str, target_memory_gb: float = Non
             max_chunk_size = min(1000, n_times)       # At most 1000 or total
             optimal_chunk_size = max(min_chunk_size, min(optimal_chunk_size, max_chunk_size))
             
-            print(f"🖥️  System Memory Info:")
+            # Get CPU info for adaptive behavior
+            cpu_cores = mp.cpu_count()
+            
+            # System classification for logging
+            if available_gb > 128:
+                system_class = "🚀 MASSIVE HPC/SERVER"
+            elif available_gb > 64:
+                system_class = "💪 VERY HIGH-END"
+            elif available_gb > 32:
+                system_class = "🖥️  HIGH-END"
+            elif available_gb > 16:
+                system_class = "💻 MID-RANGE"
+            else:
+                system_class = "📱 BASIC"
+            
+            print(f"🖥️  System Info ({system_class}):")
+            print(f"   Platform: {memory_info['platform_note']} ({memory_info['architecture']})")
             print(f"   Total RAM: {memory_info['total_gb']:.1f} GB")
             print(f"   Available RAM: {memory_info['available_gb']:.1f} GB")
             print(f"   Used RAM: {memory_info['used_gb']:.1f} GB ({memory_info['percent_used']:.1f}%)")
+            print(f"   CPU Cores: {memory_info['cpu_logical_cores']} logical ({memory_info['cpu_physical_cores']} physical)")
             print(f"📊 Dataset Info:")
             print(f"   Time steps: {n_times:,}")
             print(f"   Points per step: {n_points:,}")
             print(f"   Properties: {n_properties}")
             print(f"   Memory per timestep: {memory_per_timestep_gb:.3f} GB")
             print(f"   Total dataset size: {memory_per_timestep_gb * n_times:.1f} GB")
-            print(f"🔧 Chunk Configuration:")
-            print(f"   Target chunk memory: {safe_target_memory:.1f} GB")
+            print(f"🔧 Cross-Platform Adaptive Chunk Configuration:")
+            if 'platform_adjustment' in locals():
+                print(f"   Platform optimization: {platform_adjustment}")
+            if 'concurrent_chunks' in locals() and 'optimal_processes' in locals():
+                print(f"   Multiprocessing reality: {concurrent_chunks} concurrent chunks (not {optimal_processes})")
+            print(f"   Memory percentage: {memory_percentage*100:.1f}% of available")
+            print(f"   Target memory: {target_memory_gb:.1f} GB")
+            print(f"   Safety factor: {safety_factor:.3f} (platform-adaptive)")
+            print(f"   Final chunk memory: {safe_target_memory:.1f} GB ({(safe_target_memory / available_gb) * 100:.0f}% of available)")
             print(f"   Optimal chunk size: {optimal_chunk_size} time steps")
-            print(f"   Memory per chunk: {optimal_chunk_size * memory_per_timestep_gb:.2f} GB")
-            print(f"   Safety factor: {safety_factor:.1f}")
+            print(f"   Actual memory per chunk: {optimal_chunk_size * memory_per_timestep_gb:.2f} GB")
+            total_chunks = (n_times + optimal_chunk_size - 1) // optimal_chunk_size
+            print(f"   Total chunks needed: {total_chunks}")
+            if 'concurrent_chunks' in locals():
+                concurrent_memory = concurrent_chunks * optimal_chunk_size * memory_per_timestep_gb
+                print(f"   💡 Real concurrent memory: {concurrent_memory:.1f} GB ({(concurrent_memory / available_gb) * 100:.0f}% of available)")
+            print(f"   💡 Scales infinitely with platform-specific optimizations!")
             
             return optimal_chunk_size
             
     except Exception as e:
         print(f"Warning: Could not calculate optimal chunk size: {e}")
-        # Conservative fallback
+        # Conservative fallback with platform awareness
         memory_info = get_system_memory_info()
-        if memory_info['available_gb'] > 16:
-            return 100
-        elif memory_info['available_gb'] > 8:
-            return 50
-        else:
-            return 10
+        print(f"Using fallback chunk size calculation for {memory_info['platform_note']}")
+        
+        # Platform-specific fallback chunk sizes
+        if memory_info['platform'] == 'darwin':  # macOS
+            # More conservative fallback on macOS
+            if memory_info['available_gb'] > 16:
+                return 80
+            elif memory_info['available_gb'] > 8:
+                return 40
+            else:
+                return 8
+        else:  # Linux and others
+            # Standard fallback
+            if memory_info['available_gb'] > 16:
+                return 100
+            elif memory_info['available_gb'] > 8:
+                return 50
+            else:
+                return 10
 
 
 def monitor_memory_usage(operation_name: str = "HDF5 Operation"):
-    """Monitor and log memory usage during operations."""
+    """Monitor and log memory usage during operations with platform awareness."""
     memory_info = get_system_memory_info()
-    if memory_info['percent_used'] > 85:
-        print(f"⚠️  High memory usage detected during {operation_name}:")
+    
+    # Platform-specific memory pressure thresholds
+    if memory_info['platform'] == 'darwin':  # macOS
+        high_threshold = 80   # More conservative on macOS due to memory compression
+        critical_threshold = 90
+    else:  # Linux and others
+        high_threshold = 85   # Standard thresholds
+        critical_threshold = 95
+    
+    if memory_info['percent_used'] > high_threshold:
+        print(f"⚠️  High memory usage detected during {operation_name} ({memory_info['platform_note']}):")
         print(f"   RAM usage: {memory_info['percent_used']:.1f}%")
         print(f"   Available: {memory_info['available_gb']:.1f} GB")
-        if memory_info['percent_used'] > 95:
+        if memory_info['percent_used'] > critical_threshold:
             print(f"🚨 Critical memory usage! Consider reducing chunk size.")
     return memory_info
 
@@ -194,18 +367,25 @@ def filter_data_by_breathing_cycle_chunked(data_info: Dict, subject_name: str) -
     with h5py.File(data_info['file_path'], 'r') as f:
         print(f"Available datasets in HDF5 file: {list(f.keys())}")
         
-        # Get dataset references (don't load into memory)
-        data_dataset = f['data']
-        times_dataset = f['times']
+        # Get dataset references (don't load into memory) - handle both formats
+        if 'cfd_data' in f:
+            data_dataset = f['cfd_data']
+            times_dataset = f['time_points']
+        else:
+            data_dataset = f['data']
+            times_dataset = f['times']
         n_times = times_dataset.shape[0]
         
-        # Get properties
+        # Get properties - handle both old and new formats
         properties = None
-        if 'properties' in f.attrs:
+        if 'column_names' in f.attrs:
+            properties = f.attrs['column_names']
+            print("Found column_names in HDF5 file")
+        elif 'properties' in f.attrs:
             properties = f.attrs['properties']
             print("Found properties in HDF5 file")
         else:
-            print("No properties found in HDF5 file")
+            print("No column information found in HDF5 file")
         
         # Process times in chunks to find valid indices
         for chunk_start in range(0, n_times, chunk_size):
@@ -493,13 +673,22 @@ def find_initial_region_points_hdf5_safe(hdf5_file_path: str, patch_number: int,
         
         with h5py.File(hdf5_file_path, 'r') as f:
             # Get first time step data only (much smaller than full dataset)
-            first_timestep_data = f['data'][0]  # Shape: (n_points, n_properties)
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                first_timestep_data = f['cfd_data'][0]  # Shape: (n_points, n_properties)
+            elif 'data' in f:
+                first_timestep_data = f['data'][0]  # Shape: (n_points, n_properties)
+            else:
+                print("Error: No data array found in HDF5 file")
+                return []
             
             # Monitor memory usage
             memory_info = monitor_memory_usage("Initial region analysis")
             
-            # Get properties
-            if 'properties' in f.attrs:
+            # Get properties - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
                 print("Error: No properties found in HDF5 file")
@@ -771,6 +960,7 @@ def process_csv_files_parallel(input_files: List[Path], subject_name: str,
 def track_single_point_in_file(args: Tuple[Path, int, int]) -> Optional[Dict]:
     """
     Track a single point in one CSV file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
     
     Args:
         args: Tuple of (file_path, patch_number, face_index)
@@ -781,21 +971,46 @@ def track_single_point_in_file(args: Tuple[Path, int, int]) -> Optional[Dict]:
     file_path, patch_number, face_index = args
     
     try:
-        # Read only necessary columns for efficiency
+        # First check what columns are available
+        df_sample = pd.read_csv(file_path, nrows=1)
+        available_columns = df_sample.columns.tolist()
+        
+        # Base required columns (always present)
         required_columns = [
-            'Patch Number', 'Face Index', 'X (m)', 'Y (m)', 'Z (m)',
+            'Face Index', 'X (m)', 'Y (m)', 'Z (m)',
             'Total Pressure (Pa)', 'Velocity: Magnitude (m/s)',
             'Velocity[i] (m/s)', 'Velocity[j] (m/s)', 'Velocity[k] (m/s)',
             'Area[i] (m^2)', 'Area[j] (m^2)', 'Area[k] (m^2)'
         ]
         
-        # Check if VdotN exists
-        df_sample = pd.read_csv(file_path, nrows=1)
-        if 'VdotN' in df_sample.columns:
+        # Add Patch Number if available, otherwise we'll compute it
+        has_patch_number = 'Patch Number' in available_columns
+        if has_patch_number:
+            required_columns.insert(0, 'Patch Number')
+        
+        # Add VdotN if available
+        if 'VdotN' in available_columns:
             required_columns.append('VdotN')
         
         # Read the file with selected columns
         df = pd.read_csv(file_path, usecols=required_columns, low_memory=False)
+        
+        # If Patch Number is not present, compute it from Face Index
+        if not has_patch_number:
+            patch_numbers = []
+            current_patch = 1
+            prev_face_idx = -1
+            
+            for _, row in df.iterrows():
+                face_idx = row['Face Index']
+                # Start new patch when Face Index resets to 0 (after being > 0)
+                if face_idx == 0 and prev_face_idx > 0:
+                    current_patch += 1
+                patch_numbers.append(current_patch)
+                prev_face_idx = face_idx
+            
+            # Add Patch Number column
+            df['Patch Number'] = patch_numbers
         
         # Find the specific point
         point_data = df[(df['Patch Number'] == patch_number) & (df['Face Index'] == face_index)]
@@ -933,6 +1148,7 @@ def track_point_parallel(csv_files: List[Path], patch_number: int, face_index: i
 def track_patch_region_in_file(args: Tuple[Path, int, int, float]) -> Optional[Dict]:
     """
     Track a patch region around a center point in a single CSV file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
     
     Args:
         args: Tuple of (file_path, patch_number, face_index, radius)
@@ -945,6 +1161,23 @@ def track_patch_region_in_file(args: Tuple[Path, int, int, float]) -> Optional[D
     try:
         # Read the file
         df = pd.read_csv(file_path, low_memory=False)
+        
+        # Check if we need to add patch numbers (for raw CSV files)
+        if 'Patch Number' not in df.columns:
+            patch_numbers = []
+            current_patch = 1
+            prev_face_idx = -1
+            
+            for _, row in df.iterrows():
+                face_idx = row['Face Index']
+                # Start new patch when Face Index resets to 0 (after being > 0)
+                if face_idx == 0 and prev_face_idx > 0:
+                    current_patch += 1
+                patch_numbers.append(current_patch)
+                prev_face_idx = face_idx
+            
+            # Add Patch Number column
+            df['Patch Number'] = patch_numbers
         
         # Find center point
         center_data = df[(df['Patch Number'] == patch_number) & (df['Face Index'] == face_index)]
@@ -1084,6 +1317,7 @@ def track_patch_region_parallel(csv_files: List[Path], patch_number: int, face_i
 def track_fixed_patch_region_in_file(args: Tuple[Path, List[Tuple[int, int]]]) -> Optional[Dict]:
     """
     Track a fixed set of points (determined from first time step) in a single CSV file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
     
     Args:
         args: Tuple of (file_path, point_pairs)
@@ -1096,6 +1330,23 @@ def track_fixed_patch_region_in_file(args: Tuple[Path, List[Tuple[int, int]]]) -
     try:
         # Read the file
         df = pd.read_csv(file_path, low_memory=False)
+        
+        # Check if we need to add patch numbers (for raw CSV files)
+        if 'Patch Number' not in df.columns:
+            patch_numbers = []
+            current_patch = 1
+            prev_face_idx = -1
+            
+            for _, row in df.iterrows():
+                face_idx = row['Face Index']
+                # Start new patch when Face Index resets to 0 (after being > 0)
+                if face_idx == 0 and prev_face_idx > 0:
+                    current_patch += 1
+                patch_numbers.append(current_patch)
+                prev_face_idx = face_idx
+            
+            # Add Patch Number column
+            df['Patch Number'] = patch_numbers
         
         # Find all the specified points in this time step
         region_points = []
@@ -1386,11 +1637,27 @@ def track_point_hdf5_parallel(hdf5_file_path: str, patch_number: int, face_index
         
         with h5py.File(hdf5_file_path, 'r') as f:
             # Get dataset references (don't load into memory yet)
-            data_dataset = f['data']
-            times_dataset = f['times']
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                data_dataset = f['cfd_data']
+            elif 'data' in f:
+                data_dataset = f['data']
+            else:
+                print("❌ No data array found in HDF5 file")
+                return []
             
-            # Get properties
-            if 'properties' in f.attrs:
+            if 'time_points' in f:
+                times_dataset = f['time_points']
+            elif 'times' in f:
+                times_dataset = f['times']
+            else:
+                print("❌ No time array found in HDF5 file")
+                return []
+            
+            # Get properties - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
                 return []
@@ -1503,11 +1770,27 @@ def track_fixed_patch_region_hdf5_parallel(hdf5_file_path: str, patch_point_pair
         
         with h5py.File(hdf5_file_path, 'r') as f:
             # Get dataset references (don't load into memory yet)
-            data_dataset = f['data']
-            times_dataset = f['times']
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                data_dataset = f['cfd_data']
+            elif 'data' in f:
+                data_dataset = f['data']
+            else:
+                print("❌ No data array found in HDF5 file")
+                return []
             
-            # Get properties
-            if 'properties' in f.attrs:
+            if 'time_points' in f:
+                times_dataset = f['time_points']
+            elif 'times' in f:
+                times_dataset = f['times']
+            else:
+                print("❌ No time array found in HDF5 file")
+                return []
+            
+            # Get properties - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
                 return []
@@ -1879,12 +2162,21 @@ def track_fixed_patch_region_hdf5_optimized(hdf5_file_path: str, patch_point_pai
         trajectory_data = []
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Get dataset references
-            data_dataset = f['data']
-            times_dataset = f['times']
+            # Get dataset references - handle both old and new formats
+            if 'cfd_data' in f:
+                data_dataset = f['cfd_data']
+            else:
+                data_dataset = f['data']
             
-            # Get properties
-            if 'properties' in f.attrs:
+            if 'time_points' in f:
+                times_dataset = f['time_points']
+            else:
+                times_dataset = f['times']
+            
+            # Get properties - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
                 return []
@@ -2001,40 +2293,7 @@ def track_fixed_patch_region_hdf5_optimized(hdf5_file_path: str, patch_point_pai
         return []
 
 
-def auto_select_hdf5_tracking_method(hdf5_file_path: str, patch_point_pairs: List[Tuple[int, int]]) -> List[Dict]:
-    """
-    Automatically select the best HDF5 tracking method based on dataset size.
-    
-    Args:
-        hdf5_file_path: Path to HDF5 cache file
-        patch_point_pairs: List of (patch_number, face_index) pairs
-    
-    Returns:
-        List of tracking data dictionaries
-    """
-    try:
-        import h5py
-        import os
-        
-        # Get file size
-        file_size_gb = os.path.getsize(hdf5_file_path) / (1024**3)
-        
-        with h5py.File(hdf5_file_path, 'r') as f:
-            n_times = f['data'].shape[0]
-        
-        # Use optimized version for large datasets
-        if file_size_gb > 50 or n_times > 10000:  # >50GB or >10k timesteps
-            print(f"📊 Large dataset detected ({file_size_gb:.1f}GB, {n_times:,} timesteps)")
-            print("🚀 Using optimized tracking method for maximum speed...")
-            return track_fixed_patch_region_hdf5_optimized(hdf5_file_path, patch_point_pairs)
-        else:
-            print(f"📊 Standard dataset ({file_size_gb:.1f}GB, {n_times:,} timesteps)")
-            print("🔄 Using standard tracking method with progress bars...")
-            return track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
-            
-    except Exception as e:
-        print(f"Warning: Could not determine optimal method, using standard: {e}")
-        return track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
+# Removed duplicate function - keeping only the optimized version below
 
 
 def process_hdf5_chunk_parallel(args):
@@ -2056,9 +2315,13 @@ def process_hdf5_chunk_parallel(args):
         trajectory_data = []
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Load only this chunk
-            data_chunk = f['data'][chunk_start:chunk_end]
-            times_chunk = f['times'][chunk_start:chunk_end]
+            # Load only this chunk - handle both old and new formats
+            if 'cfd_data' in f:
+                data_chunk = f['cfd_data'][chunk_start:chunk_end]
+                times_chunk = f['time_points'][chunk_start:chunk_end]
+            else:
+                data_chunk = f['data'][chunk_start:chunk_end]
+                times_chunk = f['times'][chunk_start:chunk_end]
             
             # Unpack property indices
             x_idx, y_idx, z_idx, face_idx, patch_idx = property_indices[:5]
@@ -2133,7 +2396,7 @@ def process_hdf5_chunk_parallel(args):
         return []
 
 
-def track_fixed_patch_region_hdf5_parallel(csv_files: List[Path], point_pairs: List[Tuple[int, int]]) -> List[Dict]:
+def track_fixed_patch_region_csv_parallel(csv_files: List[Path], point_pairs: List[Tuple[int, int]]) -> List[Dict]:
     """
     Track a fixed set of points across multiple CSV files in parallel.
     
@@ -2214,9 +2477,13 @@ def process_hdf5_point_chunk_parallel(args):
         trajectory_data = []
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Load only this chunk
-            data_chunk = f['data'][chunk_start:chunk_end]
-            times_chunk = f['times'][chunk_start:chunk_end]
+            # Load only this chunk - handle both old and new formats
+            if 'cfd_data' in f:
+                data_chunk = f['cfd_data'][chunk_start:chunk_end]
+                times_chunk = f['time_points'][chunk_start:chunk_end]
+            else:
+                data_chunk = f['data'][chunk_start:chunk_end]
+                times_chunk = f['times'][chunk_start:chunk_end]
             
             # Unpack property indices
             x_idx, y_idx, z_idx, face_idx, patch_idx = property_indices[:5]
@@ -2362,7 +2629,7 @@ def track_point_hdf5_parallel_multicore(hdf5_file_path: str, patch_number: int, 
 def auto_select_hdf5_tracking_method(hdf5_file_path: str, patch_point_pairs: List[Tuple[int, int]]) -> List[Dict]:
     """
     Automatically select the best HDF5 tracking method based on dataset size.
-    Prioritizes OPTIMIZED approach with direct array indexing for large datasets.
+    Prioritizes OPTIMIZED MULTICORE approach for maximum performance.
     
     Args:
         hdf5_file_path: Path to HDF5 cache file
@@ -2381,28 +2648,51 @@ def auto_select_hdf5_tracking_method(hdf5_file_path: str, patch_point_pairs: Lis
         cpu_cores = mp.cpu_count()
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            n_times = f['data'].shape[0]
+            # Handle both old and new HDF5 formats for dataset size detection
+            if 'cfd_data' in f:
+                n_times = f['cfd_data'].shape[0]
+            else:
+                n_times = f['data'].shape[0]
         
-        print(f"📊 Dataset: {file_size_gb:.1f}GB, {n_times:,} timesteps")
-        print(f"🖥️  System: {cpu_cores} cores, {memory_info['available_gb']:.1f}GB RAM available")
+        print(f"📊 Auto-selection for HDF5 processing:")
+        print(f"   Dataset: {file_size_gb:.1f}GB, {n_times:,} timesteps")
+        print(f"   System: {cpu_cores} cores, {memory_info['available_gb']:.1f}GB RAM available")
         
-        # Use OPTIMIZED approach for datasets with multiple timesteps (User's optimization request)
-        if n_times > 5:  # For any dataset with more than 5 timesteps - enables testing with 23mmesh
-            print(f"🚀 Using OPTIMIZED approach (find indices once, direct array access)")
-            return auto_select_optimized_hdf5_tracking_method(hdf5_file_path, patch_point_pairs)
-        # Use memory-safe multi-core approach for small datasets  
-        elif cpu_cores >= 4 and memory_info['available_gb'] > 8:
-            print(f"🚀 Using MEMORY-SAFE multi-core processing ({cpu_cores} cores)")
-            return track_fixed_patch_region_hdf5_memory_safe_multicore(hdf5_file_path, patch_point_pairs)
-        elif file_size_gb > 50 or n_times > 10000:
-            print(f"🔄 Using optimized single-thread processing (memory constraints)")
+        # FIXED: Always use OPTIMIZED approach for datasets with multiple timesteps
+        if n_times > 5:  # Covers essentially all real datasets
+            print(f"✅ Triggering OPTIMIZED multicore approach (n_times={n_times} > 5)")
+            try:
+                result = auto_select_optimized_hdf5_tracking_method(hdf5_file_path, patch_point_pairs)
+                if result:  # Success
+                    return result
+                else:
+                    print(f"⚠️  Optimized method returned empty result, trying fallback...")
+            except Exception as opt_error:
+                print(f"⚠️  Optimized method failed: {opt_error}")
+                print(f"   Trying memory-safe multicore fallback...")
+        
+        # Fallback 1: Memory-safe multicore
+        if cpu_cores >= 4 and memory_info['available_gb'] > 8:
+            print(f"🔄 Using MEMORY-SAFE multi-core fallback ({cpu_cores} cores)")
+            try:
+                return track_fixed_patch_region_hdf5_memory_safe_multicore(hdf5_file_path, patch_point_pairs)
+            except Exception as mem_error:
+                print(f"⚠️  Memory-safe multicore failed: {mem_error}")
+        
+        # Fallback 2: Single-threaded optimized
+        print(f"🔄 Using single-threaded optimized fallback")
+        try:
             return track_fixed_patch_region_hdf5_optimized(hdf5_file_path, patch_point_pairs)
-        else:
-            print(f"📊 Using standard processing with progress bars")
-            return track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
+        except Exception as opt_single_error:
+            print(f"⚠️  Single-threaded optimized failed: {opt_single_error}")
+        
+        # Fallback 3: Basic sequential (last resort)
+        print(f"📊 Using basic sequential processing (last resort)")
+        return track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
             
     except Exception as e:
-        print(f"Warning: Could not determine optimal method, using standard: {e}")
+        print(f"❌ Auto-selection completely failed: {e}")
+        print(f"🆘 Using basic sequential processing as emergency fallback")
         return track_fixed_patch_region_hdf5_parallel(hdf5_file_path, patch_point_pairs)
 
 
@@ -2429,7 +2719,13 @@ def auto_select_hdf5_point_tracking_method(hdf5_file_path: str, patch_number: in
         cpu_cores = mp.cpu_count()
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            n_times = f['data'].shape[0]
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                n_times = f['cfd_data'].shape[0]
+            elif 'data' in f:
+                n_times = f['data'].shape[0]
+            else:
+                raise ValueError("No data array found in HDF5 file")
         
         print(f"📊 Dataset: {file_size_gb:.1f}GB, {n_times:,} timesteps")
         print(f"🖥️  System: {cpu_cores} cores, {memory_info['available_gb']:.1f}GB RAM available")
@@ -3108,9 +3404,16 @@ def process_hdf5_point_chunk_range_parallel(args):
         
         # Each process opens the file and loads ONLY its assigned chunk
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Load only the chunk this process needs
-            data_chunk = f['data'][chunk_start:chunk_end]
-            times_chunk = f['times'][chunk_start:chunk_end]
+            # Load only the chunk this process needs - handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                data_chunk = f['cfd_data'][chunk_start:chunk_end]
+                times_chunk = f['time_points'][chunk_start:chunk_end]
+            elif 'data' in f:
+                data_chunk = f['data'][chunk_start:chunk_end]
+                times_chunk = f['times'][chunk_start:chunk_end]
+            else:
+                print("❌ No data array found in HDF5 file")
+                return []
             
             # Unpack property indices
             x_idx, y_idx, z_idx, face_idx, patch_idx = property_indices[:5]
@@ -3189,13 +3492,22 @@ def track_point_hdf5_memory_safe_multicore(hdf5_file_path: str, patch_number: in
         chunk_size = calculate_safe_chunk_size(hdf5_file_path, target_memory_gb=memory_per_process)
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Get dataset info
-            n_times = f['data'].shape[0]
+            # Get dataset info - handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                n_times = f['cfd_data'].shape[0]
+            elif 'data' in f:
+                n_times = f['data'].shape[0]
+            else:
+                print("❌ No data array found in HDF5 file")
+                return []
             
-            # Get properties and indices
-            if 'properties' in f.attrs:
+            # Get properties and indices - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
+                print("❌ No column information found in HDF5 file")
                 return []
             
             # Find property indices
@@ -3441,13 +3753,25 @@ def track_fixed_patch_region_hdf5_optimized_multicore(hdf5_file_path: str, patch
         patch_indices = None
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Get dataset info
-            n_times = f['data'].shape[0]
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                n_times = f['cfd_data'].shape[0]
+                data_dataset_name = 'cfd_data'
+                format_info = "NEW format (cfd_data/time_points)"
+            else:
+                n_times = f['data'].shape[0]
+                data_dataset_name = 'data'
+                format_info = "OLD format (data/times)"
             
-            # Get properties and indices
-            if 'properties' in f.attrs:
+            print(f"🔧 HDF5 format detected: {format_info}")
+            
+            # Get properties and indices - handle both old and new formats
+            if 'column_names' in f.attrs:
+                properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['column_names']]
+            elif 'properties' in f.attrs:
                 properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p) for p in f.attrs['properties']]
             else:
+                print("❌ No properties found in HDF5 file!")
                 return []
             
             # Find property indices
@@ -3467,7 +3791,7 @@ def track_fixed_patch_region_hdf5_optimized_multicore(hdf5_file_path: str, patch
             property_indices = (x_idx, y_idx, z_idx, face_idx, patch_idx, pressure_idx, velocity_idx, vdotn_idx)
             
             # Find patch point indices at first timestep
-            first_timestep_data = f['data'][0]
+            first_timestep_data = f[data_dataset_name][0]
             
             patch_point_indices = []
             for patch_num, face_idx_val in patch_point_pairs:
@@ -3564,9 +3888,13 @@ def process_hdf5_chunk_optimized_parallel(args):
         
         # Each process opens the file and loads only its assigned chunk
         with h5py.File(hdf5_file_path, 'r') as f:
-            # Load only the chunk this process needs
-            data_chunk = f['data'][chunk_start:chunk_end]
-            times_chunk = f['times'][chunk_start:chunk_end]
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                data_chunk = f['cfd_data'][chunk_start:chunk_end]
+                times_chunk = f['time_points'][chunk_start:chunk_end]
+            else:
+                data_chunk = f['data'][chunk_start:chunk_end]
+                times_chunk = f['times'][chunk_start:chunk_end]
             
             # Unpack property indices
             x_idx, y_idx, z_idx, face_idx, patch_idx = property_indices[:5]
@@ -3643,17 +3971,25 @@ def auto_select_optimized_hdf5_tracking_method(hdf5_file_path: str, patch_point_
         cpu_cores = mp.cpu_count()
         
         with h5py.File(hdf5_file_path, 'r') as f:
-            n_times = f['data'].shape[0]
+            # Handle both old and new HDF5 formats
+            if 'cfd_data' in f:
+                n_times = f['cfd_data'].shape[0]
+                data_format = "NEW (cfd_data/time_points)"
+            else:
+                n_times = f['data'].shape[0]
+                data_format = "OLD (data/times)"
         
-        print(f"📊 Dataset: {file_size_gb:.1f}GB, {n_times:,} timesteps")
-        print(f"🖥️  System: {cpu_cores} cores, {memory_info['available_gb']:.1f}GB RAM available")
+        print(f"📊 Optimized method selection:")
+        print(f"   Dataset: {file_size_gb:.1f}GB, {n_times:,} timesteps")
+        print(f"   HDF5 format: {data_format}")
+        print(f"   System: {cpu_cores} cores, {memory_info['available_gb']:.1f}GB RAM available")
         
         # Use optimized multi-core approach when beneficial
         if cpu_cores >= 4 and memory_info['available_gb'] > 8:
-            print(f"🚀 Using OPTIMIZED multi-core processing ({cpu_cores} cores)")
+            print(f"🚀 Selecting OPTIMIZED multi-core processing ({cpu_cores} cores)")
             return track_fixed_patch_region_hdf5_optimized_multicore(hdf5_file_path, patch_point_pairs)
         else:
-            print(f"⚡ Using OPTIMIZED single-thread processing")
+            print(f"⚡ Selecting OPTIMIZED single-thread processing")
             return track_fixed_patch_region_hdf5_optimized_index_lookup(hdf5_file_path, patch_point_pairs)
             
     except Exception as e:

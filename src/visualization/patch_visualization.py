@@ -16,7 +16,8 @@ def visualize_patch_regions(subject_name: str,
                           patch_radii: List[float] = None,
                           use_pipeline_data: bool = True,
                           normal_angle_threshold: float = 60.0,
-                          output_dir: str = None) -> Optional[go.Figure]:
+                          output_dir: str = None,
+                          hdf5_file_path: str = None) -> Optional[go.Figure]:
     """
     Create interactive 3D visualization of patch regions on airway surface.
     
@@ -27,6 +28,7 @@ def visualize_patch_regions(subject_name: str,
         use_pipeline_data: Whether to use pre-filtered data from pipeline (default: True)
         normal_angle_threshold: Normal angle threshold for filtering (default: 60.0)
         output_dir: Directory to save HTML file (default: current directory)
+        hdf5_file_path: Path to HDF5 file (if None, tries to find it automatically)
         
     Returns:
         Plotly figure object if successful, None if failed
@@ -41,49 +43,85 @@ def visualize_patch_regions(subject_name: str,
     else:
         print("🔄 Recomputing filtering (for debugging/validation)")
     
-    # Load base airway surface
-    patched_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+    # Try to load from HDF5 first, then fall back to CSV
+    df = None
+    data_source = None
     
-    # Find the file that matches the timestep (handle scientific notation)
-    base_file = None
-    available_files = list(patched_xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
+    # Try HDF5 first
+    if hdf5_file_path is None:
+        hdf5_file_path = f"{subject_name}_cfd_data.h5"
     
-    # Import timestep extraction function
-    try:
-        from ..main import extract_timestep_from_filename
-    except ImportError:
-        # Handle direct execution or different import context
-        import sys
-        import os
-        src_dir = os.path.dirname(os.path.dirname(__file__))
-        if str(src_dir) not in sys.path:
-            sys.path.insert(0, str(src_dir))
-        from main import extract_timestep_from_filename
-    
-    # Find file with matching timestep
-    for file_path in available_files:
+    if Path(hdf5_file_path).exists():
+        print(f"📊 Loading from HDF5 file: {hdf5_file_path}")
         try:
-            file_timestep = extract_timestep_from_filename(file_path)
-            if abs(file_timestep - time_step) < 1e-6:  # Allow small floating point differences
-                base_file = file_path
-                break
-        except ValueError:
-            continue
+            from ..data_processing.trajectory import load_hdf5_data_for_html_plots
+        except ImportError:
+            # Handle direct execution or different import context
+            import sys
+            import os
+            src_dir = os.path.dirname(os.path.dirname(__file__))
+            if str(src_dir) not in sys.path:
+                sys.path.insert(0, str(src_dir))
+            from data_processing.trajectory import load_hdf5_data_for_html_plots
+        
+        df = load_hdf5_data_for_html_plots(hdf5_file_path, time_step)
+        if df is not None:
+            data_source = "HDF5 (from pipeline cache)"
+        else:
+            print("❌ Failed to load from HDF5, trying CSV fallback...")
     
-    if base_file is None:
-        print(f"❌ Base surface file not found for timestep {time_step}")
-        print(f"Available files in {patched_xyz_dir}:")
-        for f in sorted(available_files)[:5]:  # Show first 5
+    # Fall back to CSV if HDF5 failed
+    if df is None:
+        print(f"📊 Loading from CSV files...")
+        # Load base airway surface
+        patched_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+        
+        # Find the file that matches the timestep (handle scientific notation)
+        base_file = None
+        available_files = list(patched_xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
+        
+        # Import timestep extraction function
+        try:
+            from ..main import extract_timestep_from_filename
+        except ImportError:
+            # Handle direct execution or different import context
+            import sys
+            import os
+            src_dir = os.path.dirname(os.path.dirname(__file__))
+            if str(src_dir) not in sys.path:
+                sys.path.insert(0, str(src_dir))
+            from main import extract_timestep_from_filename
+        
+        # Find file with matching timestep
+        for file_path in available_files:
             try:
-                ts = extract_timestep_from_filename(f)
-                print(f"   - {f.name} (timestep: {ts})")
+                file_timestep = extract_timestep_from_filename(file_path)
+                if abs(file_timestep - time_step) < 1e-6:  # Allow small floating point differences
+                    base_file = file_path
+                    break
             except ValueError:
-                print(f"   - {f.name} (timestep: unknown)")
+                continue
+        
+        if base_file is None:
+            print(f"❌ Base surface file not found for timestep {time_step}")
+            print(f"Available files in {patched_xyz_dir}:")
+            for f in sorted(available_files)[:5]:  # Show first 5
+                try:
+                    ts = extract_timestep_from_filename(f)
+                    print(f"   - {f.name} (timestep: {ts})")
+                except ValueError:
+                    print(f"   - {f.name} (timestep: unknown)")
+            return None
+        
+        print(f"📁 Loading base surface from {base_file}")
+        df = pd.read_csv(base_file)
+        data_source = "CSV (patched files)"
+    
+    if df is None:
+        print("❌ Failed to load data from any source")
         return None
     
-    print(f"📁 Loading base surface from {base_file}")
-    df = pd.read_csv(base_file)
-    print(f"✅ Loaded {len(df):,} points from patched airway surface")
+    print(f"✅ Loaded {len(df):,} points from airway surface")
     
     # Load tracking locations
     try:
@@ -288,8 +326,7 @@ def visualize_patch_regions(subject_name: str,
             else:
                 print(f"   ✅ {radius_mm:.1f}mm: {visualization_count} points (filtered)")
     
-    # Update layout
-    data_source = "Proper Filtering (Connected Patches)"
+    # Update layout to reflect data source
     fig.update_layout(
         title=dict(
             text=f'{subject_name} - Patch Regions (t={time_step})<br>' +

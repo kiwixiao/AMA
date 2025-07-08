@@ -31,9 +31,9 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
         # Verify the file has the expected structure
         try:
             with h5py.File(save_path, 'r') as f:
-                if all(key in f for key in ['data', 'times']) and 'properties' in f.attrs:
+                if all(key in f for key in ['cfd_data', 'time_points']) and 'column_names' in f.attrs:
                     print("File structure verified. Loading existing data...")
-                    return {'file_path': save_path, 'properties': f.attrs['properties']}
+                    return {'file_path': save_path, 'properties': [name.decode('utf-8') for name in f.attrs['column_names']]}
                 else:
                     print("Existing file has incorrect structure. Will recreate...")
         except Exception as e:
@@ -49,8 +49,17 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
     n_points = len(first_df)
     n_timesteps = len(xyz_files)
     
-    # Use all columns from the raw table
+    # Use all columns from the raw table, adding Patch Number if not present
     properties = first_df.columns.tolist()
+    if 'Patch Number' not in properties:
+        # Add Patch Number after Face Index for raw CSV files
+        if 'Face Index' in properties:
+            face_idx_pos = properties.index('Face Index')
+            properties.insert(face_idx_pos + 1, 'Patch Number')
+        else:
+            properties.append('Patch Number')
+        print("📋 Added 'Patch Number' to properties list (will be computed from Face Index)")
+    
     n_properties = len(properties)
     
     print(f"Data dimensions:")
@@ -64,11 +73,11 @@ def load_tables_to_3d_array(xyz_files: List[Path], save_path: str = 'cfd_data.h5
     # Create HDF5 file
     with h5py.File(save_path, 'w') as f:
         # Create datasets with appropriate data types
-        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
-        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
+        data = f.create_dataset('cfd_data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('time_points', (n_timesteps,), dtype='float64')
         
         # Store property names exactly as they appear in the raw table
-        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
+        f.attrs['column_names'] = [p.encode('utf-8') for p in properties]
         
         # Load all tables
         for i, xyz_file in enumerate(tqdm(xyz_files, desc="Loading tables")):
@@ -224,9 +233,9 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
         # Verify the file has the expected structure
         try:
             with h5py.File(save_path, 'r') as f:
-                if all(key in f for key in ['data', 'times']) and 'properties' in f.attrs:
+                if all(key in f for key in ['cfd_data', 'time_points']) and 'column_names' in f.attrs:
                     print("File structure verified. Loading existing data...")
-                    return {'file_path': save_path, 'properties': f.attrs['properties']}
+                    return {'file_path': save_path, 'properties': [name.decode('utf-8') for name in f.attrs['column_names']]}
                 else:
                     print("Existing file has incorrect structure. Will recreate...")
         except Exception as e:
@@ -244,8 +253,17 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
     n_points = len(first_df)
     n_timesteps = len(xyz_files)
     
-    # Use all columns from the raw table
+    # Use all columns from the raw table, adding Patch Number if not present
     properties = first_df.columns.tolist()
+    if 'Patch Number' not in properties:
+        # Add Patch Number after Face Index for raw CSV files
+        if 'Face Index' in properties:
+            face_idx_pos = properties.index('Face Index')
+            properties.insert(face_idx_pos + 1, 'Patch Number')
+        else:
+            properties.append('Patch Number')
+        print("📋 Added 'Patch Number' to properties list (will be computed from Face Index)")
+    
     n_properties = len(properties)
     
     print(f"Data dimensions:")
@@ -275,11 +293,11 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
     # Create HDF5 file structure
     with h5py.File(save_path, 'w') as f:
         # Create datasets with appropriate data types
-        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
-        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
+        data = f.create_dataset('cfd_data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('time_points', (n_timesteps,), dtype='float64')
         
         # Store property names exactly as they appear in the raw table
-        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
+        f.attrs['column_names'] = [p.encode('utf-8') for p in properties]
         
         # Process CSV files in parallel
         start_time = time.time()
@@ -326,6 +344,7 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
 def process_single_csv_file(args):
     """
     Process a single CSV file for parallel loading.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
     
     Args:
         args: Tuple of (index, file_path, properties)
@@ -339,20 +358,49 @@ def process_single_csv_file(args):
         # Read CSV file
         df = pd.read_csv(xyz_file, low_memory=False)
         
+        # Check if we need to add patch numbers (for raw CSV files)
+        if 'Patch Number' not in df.columns:
+            # Add patch numbers using Face Index reset logic
+            patch_numbers = []
+            current_patch = 1
+            prev_face_idx = -1
+            
+            for _, row in df.iterrows():
+                face_idx = row['Face Index']
+                # Start new patch when Face Index resets to 0 (after being > 0)
+                if face_idx == 0 and prev_face_idx > 0:
+                    current_patch += 1
+                patch_numbers.append(current_patch)
+                prev_face_idx = face_idx
+            
+            # Add Patch Number column right after Face Index
+            face_idx_col = df.columns.get_loc('Face Index')
+            df.insert(face_idx_col + 1, 'Patch Number', patch_numbers)
+            
+            print(f"  Added patch numbers to file {index} ({len(set(patch_numbers))} patches)")
+        
         # Extract timestep using robust method (handles scientific notation, decimals, etc.)
         from utils.file_processing import extract_timestep_from_filename
         table_time = extract_timestep_from_filename(xyz_file) * 0.001  # Convert to seconds
         
-        # Process data for each property
+        # Process data for each property (now includes Patch Number if it was added)
         n_points = len(df)
         n_properties = len(properties)
         table_data = np.zeros((n_points, n_properties))
         
         for j, prop in enumerate(properties):
             try:
-                # Convert to numeric, handling any non-numeric values
-                values = pd.to_numeric(df[prop], errors='coerce').fillna(0.0)
-                table_data[:, j] = values.values
+                # Handle Patch Number specially (it's integer)
+                if prop == 'Patch Number':
+                    if prop in df.columns:
+                        table_data[:, j] = df[prop].values.astype(float)
+                    else:
+                        # This shouldn't happen now, but just in case
+                        table_data[:, j] = np.zeros(n_points)
+                else:
+                    # Convert to numeric, handling any non-numeric values
+                    values = pd.to_numeric(df[prop], errors='coerce').fillna(0.0)
+                    table_data[:, j] = values.values
             except Exception as e:
                 print(f"Warning: Error converting column '{prop}' in file {index}: {e}")
                 # Fill with zeros if conversion fails
@@ -362,8 +410,16 @@ def process_single_csv_file(args):
         
     except Exception as e:
         print(f"Error processing file {xyz_file}: {e}")
-        # Return zeros if file processing fails
-        return np.zeros((n_points, n_properties)), 0.0
+        # Return zeros if file processing fails - need to get dimensions from somewhere
+        try:
+            # Try to read just the first few rows to get dimensions
+            sample_df = pd.read_csv(xyz_file, nrows=10, low_memory=False)
+            n_points_est = len(sample_df)  # This is just a sample
+            n_properties = len(properties)
+            return np.zeros((n_points_est, n_properties)), 0.0
+        except:
+            # Ultimate fallback
+            return np.zeros((1000, len(properties))), 0.0
 
 def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
     """
@@ -388,9 +444,9 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
         # Verify the file has the expected structure
         try:
             with h5py.File(save_path, 'r') as f:
-                if all(key in f for key in ['data', 'times']) and 'properties' in f.attrs:
+                if all(key in f for key in ['cfd_data', 'time_points']) and 'column_names' in f.attrs:
                     print("File structure verified. Loading existing data...")
-                    return {'file_path': save_path, 'properties': f.attrs['properties']}
+                    return {'file_path': save_path, 'properties': [name.decode('utf-8') for name in f.attrs['column_names']]}
                 else:
                     print("Existing file has incorrect structure. Will recreate...")
         except Exception as e:
@@ -410,8 +466,17 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
     n_points = len(first_df)
     n_timesteps = len(xyz_files)
     
-    # Use all columns from the raw table
+    # Use all columns from the raw table, adding Patch Number if not present
     properties = first_df.columns.tolist()
+    if 'Patch Number' not in properties:
+        # Add Patch Number after Face Index for raw CSV files
+        if 'Face Index' in properties:
+            face_idx_pos = properties.index('Face Index')
+            properties.insert(face_idx_pos + 1, 'Patch Number')
+        else:
+            properties.append('Patch Number')
+        print("📋 Added 'Patch Number' to properties list (will be computed from Face Index)")
+    
     n_properties = len(properties)
     
     # Calculate memory usage per timestep
@@ -458,11 +523,11 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
     # Create HDF5 file structure
     with h5py.File(save_path, 'w') as f:
         # Create datasets with appropriate data types
-        data = f.create_dataset('data', (n_timesteps, n_points, n_properties), dtype='float64')
-        times = f.create_dataset('times', (n_timesteps,), dtype='float64')
+        data = f.create_dataset('cfd_data', (n_timesteps, n_points, n_properties), dtype='float64')
+        times = f.create_dataset('time_points', (n_timesteps,), dtype='float64')
         
         # Store property names exactly as they appear in the raw table
-        f.attrs['properties'] = [p.encode('utf-8') for p in properties]
+        f.attrs['column_names'] = [p.encode('utf-8') for p in properties]
         
         # Process CSV files in parallel batches
         start_time = time.time()
@@ -540,7 +605,13 @@ def auto_select_csv_to_hdf5_method(xyz_files: List[Path], save_path: str = 'cfd_
     # Estimate memory requirements
     first_df = pd.read_csv(xyz_files[0], low_memory=False)
     n_points = len(first_df)
-    n_properties = len(first_df.columns)
+    
+    # Account for Patch Number column if it will be added
+    properties = first_df.columns.tolist()
+    if 'Patch Number' not in properties:
+        n_properties = len(properties) + 1  # +1 for Patch Number
+    else:
+        n_properties = len(properties)
     
     # Memory per timestep in GB
     memory_per_timestep_gb = (n_points * n_properties * 8) / (1024**3)
@@ -557,4 +628,128 @@ def auto_select_csv_to_hdf5_method(xyz_files: List[Path], save_path: str = 'cfd_
         return load_tables_to_3d_array_memory_safe_parallel(xyz_files, save_path, overwrite_existing)
     else:
         print("🚀 Using STANDARD PARALLEL method (dataset fits in memory)")
-        return load_tables_to_3d_array_parallel(xyz_files, save_path, overwrite_existing) 
+        return load_tables_to_3d_array_parallel(xyz_files, save_path, overwrite_existing)
+
+def load_hdf5_data_for_html_plots(hdf5_file_path: str, time_point: int = None) -> pd.DataFrame:
+    """
+    Load data from HDF5 file for HTML plot generation.
+    
+    Args:
+        hdf5_file_path: Path to the HDF5 file
+        time_point: Specific time point to load (if None, loads first time point)
+        
+    Returns:
+        DataFrame with the loaded data
+    """
+    import h5py
+    import pandas as pd
+    import numpy as np
+    
+    print(f"📊 Loading HDF5 data for HTML plots from: {hdf5_file_path}")
+    
+    try:
+        with h5py.File(hdf5_file_path, 'r') as f:
+            # Handle both old and new HDF5 file formats
+            if 'cfd_data' in f:
+                data = f['cfd_data']
+                times = f['time_points'][:]
+                
+                # Try new format first, then fall back to old format
+                if 'column_names' in f.attrs:
+                    column_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name) for name in f.attrs['column_names']]
+                elif 'properties' in f.attrs:
+                    column_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name) for name in f.attrs['properties']]
+                else:
+                    print("❌ No column information found in HDF5 file")
+                    return None
+            elif 'data' in f:
+                # Old format compatibility
+                data = f['data']
+                times = f['times'][:]
+                
+                if 'properties' in f.attrs:
+                    column_names = [name.decode('utf-8') if isinstance(name, bytes) else str(name) for name in f.attrs['properties']]
+                else:
+                    print("❌ No properties found in old format HDF5 file")
+                    return None
+            else:
+                print("❌ No data array found in HDF5 file")
+                return None
+            
+            # Find the time point to load
+            if time_point is None:
+                # Load first time point
+                time_idx = 0
+                actual_time = times[0]
+                print(f"  Loading first time point: {actual_time:.6f}s")
+            else:
+                # Find closest time point
+                time_diffs = np.abs(times - time_point * 0.001)  # Convert ms to seconds
+                time_idx = np.argmin(time_diffs)
+                actual_time = times[time_idx]
+                print(f"  Loading time point {time_point} (actual: {actual_time:.6f}s)")
+            
+            # Load data for the specific time point
+            time_data = data[time_idx, :, :]
+            
+            # Create DataFrame
+            df = pd.DataFrame(time_data, columns=column_names)
+            
+            # Add patch numbers based on Face Index resets (same logic as CSV processing)
+            if 'Patch Number' not in df.columns:
+                patch_numbers = []
+                current_patch = 1
+                prev_face_idx = -1
+                
+                for _, row in df.iterrows():
+                    face_idx = row['Face Index']
+                    # Start new patch when Face Index resets to 0 (after being > 0)
+                    if face_idx == 0 and prev_face_idx > 0:
+                        current_patch += 1
+                    patch_numbers.append(current_patch)
+                    prev_face_idx = face_idx
+                
+                # Add Patch Number column right after Face Index
+                face_idx_col = df.columns.get_loc('Face Index')
+                df.insert(face_idx_col + 1, 'Patch Number', patch_numbers)
+                print(f"  Added Patch Number column with {len(np.unique(patch_numbers))} patches")
+            else:
+                print(f"  'Patch Number' column already exists, using existing values")
+            
+            # Get unique patch count for reporting
+            unique_patches = len(df['Patch Number'].unique())
+            print(f"  Loaded {len(df):,} points with {unique_patches} patches")
+            
+            return df
+            
+    except Exception as e:
+        print(f"❌ Error loading HDF5 data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def get_hdf5_first_time_point(hdf5_file_path: str) -> float:
+    """
+    Get the first time point from HDF5 file.
+    Handles both old and new HDF5 file formats.
+    
+    Args:
+        hdf5_file_path: Path to the HDF5 file
+        
+    Returns:
+        First time point in seconds
+    """
+    try:
+        with h5py.File(hdf5_file_path, 'r') as f:
+            # Handle both old and new formats
+            if 'time_points' in f:
+                times = f['time_points'][:]
+            elif 'times' in f:
+                times = f['times'][:]
+            else:
+                print("❌ No time data found in HDF5 file")
+                return None
+            return times[0]
+    except Exception as e:
+        print(f"❌ Error getting first time point from HDF5: {e}")
+        return None 
