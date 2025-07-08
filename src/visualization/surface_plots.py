@@ -75,9 +75,18 @@ def plot_3d_trajectory(xyz_file, trajectory_points, labels):
     plt.savefig('cfd_3d_trajectory.pdf', bbox_inches='tight')
     plt.close()
 
-def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str, output_dir: str = None):
-    """Create an interactive 3D visualization of surface patches with original face indices."""
-    print("\nReading data and preserving original face indices...")
+def plot_3d_interactive_all_patches(data_source, tracking_points, subject_name: str, output_dir: str = None, time_point: int = None):
+    """
+    Create an interactive 3D visualization of surface patches with original face indices.
+    
+    Args:
+        data_source: Either a CSV file path or HDF5 file path
+        tracking_points: List of tracking point configurations
+        subject_name: Subject name for output files
+        output_dir: Directory to save HTML file
+        time_point: Time point to visualize (for HDF5 data)
+    """
+    print("\nCreating interactive 3D visualization...")
     
     # Create a dictionary mapping (patch_number, face_index) to description
     point_to_desc = {}
@@ -86,8 +95,33 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
         for face_idx in loc['face_indices']:
             point_to_desc[(patch_num, face_idx)] = loc['description']
     
-    # Read the data
-    df = pd.read_csv(xyz_file, low_memory=False)
+    # Load data from appropriate source
+    if str(data_source).endswith('.h5') or str(data_source).endswith('.hdf5'):
+        # Load from HDF5 file
+        try:
+            from ..data_processing.trajectory import load_hdf5_data_for_html_plots
+        except ImportError:
+            # Handle direct execution or different import context
+            import sys
+            import os
+            src_dir = os.path.dirname(os.path.dirname(__file__))
+            if str(src_dir) not in sys.path:
+                sys.path.insert(0, str(src_dir))
+            from data_processing.trajectory import load_hdf5_data_for_html_plots
+        
+        print(f"📊 Loading data from HDF5 file: {data_source}")
+        df = load_hdf5_data_for_html_plots(str(data_source), time_point)
+        
+        if df is None:
+            print("❌ Failed to load HDF5 data")
+            return
+        
+        data_source_type = "HDF5"
+    else:
+        # Load from CSV file (legacy support)
+        print(f"📊 Loading data from CSV file: {data_source}")
+        df = pd.read_csv(data_source, low_memory=False)
+        data_source_type = "CSV"
     
     points = []
     face_indices = []
@@ -95,36 +129,56 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
     tracked_points = []
     tracked_labels = []
     
-    # Detect patches based on Face Index resets
-    current_patch = 1
-    prev_face_idx = -1
+    # Process data based on source type
+    if data_source_type == "CSV":
+        # Original CSV processing logic
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            point_coords = [row['X (m)'], row['Y (m)'], row['Z (m)']]
+            face_idx = row['Face Index']
+            
+            # Detect new patch when Face Index resets to 0 after being > 0
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            
+            points.append(point_coords)
+            face_indices.append(face_idx)
+            patch_numbers.append(current_patch)
+            
+            # Check if this is a tracked point
+            point_key = (current_patch, int(face_idx))
+            if point_key in point_to_desc:
+                tracked_points.append(point_coords)
+                tracked_labels.append(f"{point_to_desc[point_key]}\n(Patch {point_key[0]}, Face {point_key[1]})")
+                print(f"Found tracked point: {point_to_desc[point_key]} at patch {point_key[0]}, face {point_key[1]}")
+            
+            prev_face_idx = face_idx
     
-    for _, row in df.iterrows():
-        point_coords = [row['X (m)'], row['Y (m)'], row['Z (m)']]
-        face_idx = row['Face Index']
-        
-        # Detect new patch when Face Index resets to 0 after being > 0
-        if face_idx == 0 and prev_face_idx > 0:
-            current_patch += 1
-        
-        points.append(point_coords)
-        face_indices.append(face_idx)
-        patch_numbers.append(current_patch)
-        
-        # Check if this is a tracked point
-        point_key = (current_patch, int(face_idx))
-        if point_key in point_to_desc:
-            tracked_points.append(point_coords)
-            tracked_labels.append(f"{point_to_desc[point_key]}\n(Patch {point_key[0]}, Face {point_key[1]})")
-            print(f"Found tracked point: {point_to_desc[point_key]} at patch {point_key[0]}, face {point_key[1]}")
-        
-        prev_face_idx = face_idx
+    else:  # HDF5 data
+        # HDF5 data already has Patch Number column added
+        for _, row in df.iterrows():
+            point_coords = [row['X (m)'], row['Y (m)'], row['Z (m)']]
+            face_idx = row['Face Index']
+            patch_num = row['Patch Number']
+            
+            points.append(point_coords)
+            face_indices.append(face_idx)
+            patch_numbers.append(patch_num)
+            
+            # Check if this is a tracked point
+            point_key = (int(patch_num), int(face_idx))
+            if point_key in point_to_desc:
+                tracked_points.append(point_coords)
+                tracked_labels.append(f"{point_to_desc[point_key]}\n(Patch {point_key[0]}, Face {point_key[1]})")
+                print(f"Found tracked point: {point_to_desc[point_key]} at patch {point_key[0]}, face {point_key[1]}")
     
     points = np.array(points)
     face_indices = np.array(face_indices)
     patch_numbers = np.array(patch_numbers)
     
-    print(f"\nFound {len(np.unique(patch_numbers))} patches")
+    print(f"Found {len(np.unique(patch_numbers))} patches")
     
     # Create Plotly figure
     fig = go.Figure()
@@ -139,7 +193,7 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
             continue
             
         hover_text = [
-            f'Patch {patch_num}<br>'
+            f'Patch {int(patch_num)}<br>'
             f'Original Face Index: {int(face_idx)}<br>'
             f'X: {x:.6f}<br>'
             f'Y: {y:.6f}<br>'
@@ -154,12 +208,12 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
             mode='markers',
             marker=dict(
                 size=1.5,  # Smaller points for better performance and visual clarity
-                color=colors[patch_num % len(colors)],
+                color=colors[int(patch_num) % len(colors)],  # Convert to int to avoid numpy.float64 indexing error
                 opacity=0.8,  # Good visibility without being too heavy
                 line=dict(width=0.2, color='rgba(0,0,0,0.2)'),  # Minimal outline
                 sizemode='diameter'  # More consistent sizing
             ),
-            name=f'Patch {patch_num}<br>Face Indices: {int(np.min(patch_face_indices))}-{int(np.max(patch_face_indices))}',
+            name=f'Patch {int(patch_num)}<br>Face Indices: {int(np.min(patch_face_indices))}-{int(np.max(patch_face_indices))}',
             text=hover_text,
             hoverinfo='text'
         ))
@@ -183,8 +237,10 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
             hoverinfo='text'
         ))
     
+    # Update title to reflect data source
+    time_info = f" (t={time_point})" if time_point is not None else ""
     fig.update_layout(
-        title=f'Surface Patches with Tracked Points - {subject_name}<br>Each color represents a different patch<br><sub>Use selection tools in toolbar to select points</sub>',
+        title=f'Surface Patches with Tracked Points - {subject_name}{time_info}<br>Data Source: {data_source_type}<br>Each color represents a different patch<br><sub>Use selection tools in toolbar to select points</sub>',
         scene=dict(
             xaxis_title='X (m)',
             yaxis_title='Y (m)',
@@ -219,7 +275,7 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
         height=800,
         showlegend=True,
         legend=dict(
-            title='🎯 Interactive 3D View:<br>• Rotate: Click and drag<br>• Zoom: Scroll wheel<br>• Pan: Shift + Click and drag<br>• Hover for point details',
+            title=f'🎯 Interactive 3D View ({data_source_type} Data):<br>• Rotate: Click and drag<br>• Zoom: Scroll wheel<br>• Pan: Shift + Click and drag<br>• Hover for point details',
             yanchor="top",
             y=0.99,
             xanchor="left",
@@ -241,9 +297,9 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
         html_filename = f'{subject_name}_surface_patches_interactive.html'
     
     # Add simple JavaScript for 3D navigation info
-    custom_js = """
+    custom_js = f"""
     <script>
-    document.addEventListener('DOMContentLoaded', function() {
+    document.addEventListener('DOMContentLoaded', function() {{
         var plotDiv = document.getElementsByClassName('plotly-graph-div')[0];
         
         console.log('🎯 Surface patches 3D visualization loaded');
@@ -252,8 +308,8 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
         // Add navigation help panel
         var helpDiv = document.createElement('div');
         helpDiv.id = 'navigation-help';
-        helpDiv.innerHTML = \`
-            <h4 style="margin: 0 0 8px 0; color: #2c3e50;">🎯 3D Navigation</h4>
+        helpDiv.innerHTML = `
+            <h4 style="margin: 0 0 8px 0; color: #2c3e50;">🎯 3D Navigation ({data_source_type} Data)</h4>
             <div style="font-size: 12px; line-height: 1.4;">
                 <div style="margin-bottom: 6px;">
                     <strong>🔄 Rotate:</strong> Click and drag<br>
@@ -265,8 +321,8 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
                     Note: Point selection not available in 3D view
                 </div>
             </div>
-        \`;
-        helpDiv.style.cssText = \`
+        `;
+        helpDiv.style.cssText = `
             position: fixed;
             bottom: 20px;
             right: 20px;
@@ -279,11 +335,11 @@ def plot_3d_interactive_all_patches(xyz_file, tracking_points, subject_name: str
             z-index: 1000;
             box-shadow: 0 4px 15px rgba(0,0,0,0.2);
             max-width: 280px;
-        \`;
+        `;
         document.body.appendChild(helpDiv);
         
         console.log('✅ Enhanced 3D selection system initialized');
-    });
+    }});
     </script>
     """
     

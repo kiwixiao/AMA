@@ -43,7 +43,7 @@ from utils.file_processing import (
 from utils.parallel_csv_processing import (
     track_point_parallel,
     track_patch_region_parallel,
-    track_fixed_patch_region_parallel,
+    track_fixed_patch_region_csv_parallel,
     track_point_hdf5_parallel,
     track_fixed_patch_region_hdf5_parallel,
     auto_select_hdf5_tracking_method,
@@ -310,8 +310,28 @@ def find_points_in_circle(df: pd.DataFrame, center_point: Tuple[float, float, fl
     return df_nearby[(distances_in_plane <= radius) & same_side]
 
 def calculate_patch_average_pressure(file_path: Path, patch_number: int = 35) -> float:
-    """Calculate average Total Pressure for a given patch number."""
+    """Calculate average Total Pressure for a given patch number.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
+    """
     df = pd.read_csv(file_path, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
+    
     patch_data = df[df['Patch Number'] == patch_number]
     if len(patch_data) == 0:
         return None
@@ -322,6 +342,7 @@ def find_initial_region_points(xyz_file: Path, patch_number: int, face_index: in
     """
     Find all points in the circular region around a center point in the first time step.
     Returns a list of (patch_number, face_index) pairs for all points in the region.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
     
     Args:
         xyz_file: Path to the first time step XYZ table file
@@ -333,6 +354,23 @@ def find_initial_region_points(xyz_file: Path, patch_number: int, face_index: in
         List of (patch_number, face_index) tuples for all points in the region
     """
     df = pd.read_csv(xyz_file, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
     
     # Get center point coordinates
     center_data = df[(df['Patch Number'] == patch_number) & (df['Face Index'] == face_index)]
@@ -359,8 +397,27 @@ def find_initial_region_points(xyz_file: Path, patch_number: int, face_index: in
     return point_pairs
 
 def track_point_in_file(file_path: Path, patch_number: int, face_index: int) -> dict:
-    """Track a specific point in a single time step file."""
+    """Track a specific point in a single time step file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
+    """
     df = pd.read_csv(file_path, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
     
     # Get point data
     point_data = df[(df['Patch Number'] == patch_number) & (df['Face Index'] == face_index)]
@@ -434,8 +491,27 @@ def track_point_in_file(file_path: Path, patch_number: int, face_index: int) -> 
     }
 
 def track_patch_region_in_file(file_path: Path, patch_number: int, face_index: int, radius: float) -> dict:
-    """Track a patch region around a center point in a single time step file."""
+    """Track a patch region around a center point in a single time step file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
+    """
     df = pd.read_csv(file_path, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
     
     # Find center point coordinates
     center_data = df[(df['Patch Number'] == patch_number) & (df['Face Index'] == face_index)]
@@ -485,8 +561,27 @@ def track_patch_region_in_file(file_path: Path, patch_number: int, face_index: i
     }
 
 def track_region_in_file(file_path: Path, point_pairs: list) -> dict:
-    """Track all points in a region for a single time step file."""
+    """Track all points in a region for a single time step file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
+    """
     df = pd.read_csv(file_path, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
     
     # Create boolean mask for all points in the region
     mask = pd.DataFrame({'Patch Number': df['Patch Number'], 'Face Index': df['Face Index']})
@@ -556,6 +651,12 @@ def track_region_in_file(file_path: Path, point_pairs: list) -> dict:
         'pressure': avg_pressure,
         'adjusted_pressure': avg_pressure - patch_avg_pressure,
         'velocity': avg_velocity,
+        'velocity_i': region_points['Velocity[i] (m/s)'].mean(),
+        'velocity_j': region_points['Velocity[j] (m/s)'].mean(),
+        'velocity_k': region_points['Velocity[k] (m/s)'].mean(),
+        'area_i': region_points['Area[i] (m^2)'].mean(),
+        'area_j': region_points['Area[j] (m^2)'].mean(),
+        'area_k': region_points['Area[k] (m^2)'].mean(),
         'vdotn': vdotn,
         'signed_velocity': signed_velocity,
         'patch35_avg_pressure': patch_avg_pressure,
@@ -3216,8 +3317,27 @@ def auto_detect_subject() -> str:
         return selected_subject
 
 def track_fixed_patch_region_in_file(file_path: Path, point_pairs: list) -> dict:
-    """Track a fixed set of points (determined from first time step) in a single time step file."""
+    """Track a fixed set of points (determined from first time step) in a single time step file.
+    Handles both raw CSV files (without Patch Number) and patched CSV files.
+    """
     df = pd.read_csv(file_path, low_memory=False)
+    
+    # Check if we need to add patch numbers (for raw CSV files)
+    if 'Patch Number' not in df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        
+        for _, row in df.iterrows():
+            face_idx = row['Face Index']
+            # Start new patch when Face Index resets to 0 (after being > 0)
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        
+        # Add Patch Number column
+        df['Patch Number'] = patch_numbers
     
     # Find all the specified points in this time step
     region_points = []
@@ -3294,6 +3414,85 @@ def track_fixed_patch_region_in_file(file_path: Path, point_pairs: list) -> dict
 
 # Smoothed flow profile generation functions removed - smoothing is now done in-memory during analysis
 
+def auto_detect_visualization_timestep(subject_name: str) -> Tuple[float, int]:
+    """
+    Auto-detect the appropriate timestep for visualization using the same logic as patch highlighting.
+    
+    Returns:
+        Tuple of (timestep_value, display_timestep_ms) where:
+        - timestep_value: Raw timestep value to use for visualization 
+        - display_timestep_ms: Timestep converted to milliseconds for display
+    """
+    # Check for patched XYZ files first
+    xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+    if not xyz_dir.exists():
+        # Fall back to raw files
+        xyz_dir = Path(f'{subject_name}_xyz_tables')
+        if not xyz_dir.exists():
+            print("⚠️  Warning: No XYZ directory found, using default 100ms")
+            return 100.0, 100
+    
+    # Get available timesteps
+    available_files = list(xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
+    if not available_files:
+        print("⚠️  Warning: No XYZ files found, using default 100ms")
+        return 100.0, 100
+    
+    # Sort files in natural chronological order
+    timestep_file_pairs = []
+    for file_path in available_files:
+        try:
+            timestep = extract_timestep_from_filename(file_path)
+            timestep_file_pairs.append((timestep, file_path))
+        except ValueError:
+            continue
+    
+    if not timestep_file_pairs:
+        print("⚠️  Warning: No valid timesteps found, using default 100ms")
+        return 100.0, 100
+    
+    # Sort by timestep value (natural chronological order)
+    timestep_file_pairs.sort(key=lambda x: x[0])
+    sorted_files = [file_path for timestep, file_path in timestep_file_pairs]
+    
+    # Filter files to only include those within the breathing cycle (same as tracking)
+    start_time, end_time = find_breathing_cycle_bounds(subject_name)
+    if start_time is not None and end_time is not None:
+        filtered_files = filter_xyz_files_by_time(sorted_files, start_time, end_time)
+        if filtered_files:
+            # Use the first file from the breathing cycle (same as tracking analysis)
+            first_file = filtered_files[0]
+            visualization_timestep = extract_timestep_from_filename(first_file)
+            
+            # Convert to milliseconds for display message only
+            if 'e+' in first_file.stem or 'e-' in first_file.stem:
+                # Scientific notation - likely in seconds
+                display_timestep = int(visualization_timestep * 1000)
+            else:
+                # Likely already in milliseconds
+                display_timestep = int(visualization_timestep)
+            
+            print(f"🎯 Auto-detected timestep {display_timestep}ms for visualization (first file in breathing cycle)")
+            return visualization_timestep, display_timestep
+        else:
+            print("⚠️  Warning: No files found within breathing cycle, using first available file")
+    else:
+        print("⚠️  Warning: Could not determine breathing cycle bounds, using first available file")
+    
+    # Use first available file as fallback
+    first_timestep = timestep_file_pairs[0][0]
+    first_file = timestep_file_pairs[0][1]
+    visualization_timestep = first_timestep
+    
+    # Convert to milliseconds for display message only
+    if 'e+' in first_file.stem or 'e-' in first_file.stem:
+        display_timestep = int(first_timestep * 1000)
+    else:
+        display_timestep = int(first_timestep)
+    
+    print(f"🎯 Auto-detected timestep {display_timestep}ms for visualization (first available file)")
+    return visualization_timestep, display_timestep
+
 def main(overwrite_existing: bool = False,
          enable_patch_analysis: bool = True,
          patch_radii: List[float] = None,
@@ -3333,50 +3532,12 @@ def main(overwrite_existing: bool = False,
     
     # Handle highlight-patches mode
     if highlight_patches:
-        # Find an appropriate timestep for this subject if default doesn't work
-        xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
-        if xyz_dir.exists():
-            # Get available timesteps and use the first one if default doesn't exist
-            available_files = list(xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
-            if available_files:
-                # Check if default timestep file exists
-                default_file = xyz_dir / f'patched_XYZ_Internal_Table_table_{patch_timestep}.csv'
-                if not default_file.exists():
-                    # Extract timesteps and sort them
-                    timestep_file_pairs = []
-                    for file_path in available_files:
-                        try:
-                            timestep = extract_timestep_from_filename(file_path)
-                            timestep_file_pairs.append((timestep, file_path))
-                        except ValueError:
-                            continue
-                    
-                    if timestep_file_pairs:
-                        # Sort by timestep and use the first (earliest) one
-                        timestep_file_pairs.sort(key=lambda x: x[0])
-                        first_timestep = timestep_file_pairs[0][0]
-                        first_file = timestep_file_pairs[0][1]
-                        
-                        # Use the original timestep value for visualization
-                        patch_timestep = first_timestep
-                        
-                        # Convert to milliseconds for display message only
-                        if 'e+' in first_file.stem or 'e-' in first_file.stem:
-                            # Scientific notation - likely in seconds
-                            display_timestep = int(first_timestep * 1000)
-                        else:
-                            # Likely already in milliseconds
-                            display_timestep = int(first_timestep)
-                        
-                        print(f"\n🎨 Highlight-patches mode: Auto-detected timestep {display_timestep}ms for visualization")
-                    else:
-                        print(f"\n🎨 Highlight-patches mode: Using default timestep {patch_timestep}ms")
-                else:
-                    print(f"\n🎨 Highlight-patches mode: Using specified timestep {patch_timestep}ms")
-            else:
-                print(f"\n🎨 Highlight-patches mode: Using default timestep {patch_timestep}ms (no files found)")
+        # Use consistent timestep detection logic
+        if patch_timestep == 100:  # Only auto-detect if using default
+            patch_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
+            print(f"\n🎨 Highlight-patches mode: {display_timestep}ms")
         else:
-            print(f"\n🎨 Highlight-patches mode: Using default timestep {patch_timestep}ms (no directory found)")
+            print(f"\n🎨 Highlight-patches mode: Using specified timestep {patch_timestep}ms")
         
         # Set default patch radii if not provided
         if patch_radii is None:
@@ -3411,7 +3572,8 @@ def main(overwrite_existing: bool = False,
                 time_step=patch_timestep,
                 patch_radii=patch_radii,
                 use_pipeline_data=True,
-                normal_angle_threshold=normal_angle_threshold
+                normal_angle_threshold=normal_angle_threshold,
+                hdf5_file_path=f"{subject_name}_cfd_data.h5"  # Use HDF5 data instead of CSV
             )
             
             if fig:
@@ -3602,10 +3764,11 @@ def main(overwrite_existing: bool = False,
             all_files_exist = False
             break
     
+    # Set HDF5 file path before processing (needed for visualization)
+    hdf5_file_path = f"{subject_name}_cfd_data.h5"
+    
     # Only process raw data if needed
     if overwrite_existing or not all_files_exist:
-        # Check if HDF5 cache already exists before processing CSV files
-        hdf5_file_path = f"{subject_name}_cfd_data.h5"
         
         if Path(hdf5_file_path).exists() and not overwrite_existing:
             print(f"\n🚀 Found existing HDF5 cache: {hdf5_file_path}")
@@ -3615,40 +3778,13 @@ def main(overwrite_existing: bool = False,
             from data_processing.trajectory import auto_select_csv_to_hdf5_method
             data_info = {'file_path': hdf5_file_path, 'properties': None}
             
-            # We still need to get the CSV file list for compatibility with current tracking functions
-            # But we'll add HDF5-based tracking as an option
-            xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
-            xyz_files = list(xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
+            # Skip CSV processing entirely when using HDF5 cache
+            # No need for patched CSV files - HDF5 contains all the data
+            xyz_files = []  # Empty list - using HDF5 directly
             
-            if xyz_files:
-                # Sort and filter files as usual for compatibility
-                timestep_file_pairs = []
-                for file_path in xyz_files:
-                    try:
-                        timestep = extract_timestep_from_filename(file_path)
-                        timestep_file_pairs.append((timestep, file_path))
-                    except ValueError:
-                        print(f"Warning: Could not parse timestep from {file_path.name}")
-                        continue
-                
-                timestep_file_pairs.sort(key=lambda x: x[0])
-                xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
-                
-                # Filter files to only include those within the breathing cycle
-                start_time, end_time = find_breathing_cycle_bounds(subject_name)
-                if start_time is None or end_time is None:
-                    print("Error: Could not determine breathing cycle bounds!")
-                    return
-                
-                xyz_files = filter_xyz_files_by_time(xyz_files, start_time, end_time)
-                if not xyz_files:
-                    print("Error: No files found within breathing cycle bounds!")
-                    return
-                
-                print(f"✅ Using HDF5 cache with {len(xyz_files)} time steps for tracking")
-            else:
-                print("Warning: No CSV files found for compatibility. Will use HDF5 directly.")
-                xyz_files = []
+            # No CSV files needed - HDF5 contains all data already filtered
+            print("✅ Using HDF5 cache directly (no CSV files needed)")
+            xyz_files = []
         
         else:
             # Original CSV processing path
@@ -3672,7 +3808,8 @@ def main(overwrite_existing: bool = False,
                 raw_xyz_files = list(raw_xyz_dir.glob('XYZ_Internal_Table_table_*.csv'))
                 
                 if raw_xyz_files:
-                    print(f"Found {len(raw_xyz_files)} raw XYZ files, processing to add patch numbers...")
+                    print(f"Found {len(raw_xyz_files)} raw XYZ files")
+                    print(f"⚠️  SKIPPING patched CSV creation (saving disk space - using HDF5 instead)")
                     # Sort raw files using natural chronological order based on timestep values
                     timestep_file_pairs = []
                     for file_path in raw_xyz_files:
@@ -3685,12 +3822,10 @@ def main(overwrite_existing: bool = False,
                     
                     # Sort by timestep value (natural chronological order)
                     timestep_file_pairs.sort(key=lambda x: x[0])
-                    raw_xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
+                    xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
                     
-                    # Process raw files to add patch numbers using parallel processing
-                    print(f"🚀 Using parallel processing for CSV patching...")
-                    xyz_files = preprocess_all_tables_parallel(raw_xyz_files, subject_name)
-                    print(f"✅ Successfully created {len(xyz_files)} patched files")
+                    # Use raw files directly for HDF5 conversion (skip patched CSV creation)
+                    print(f"✅ Using {len(xyz_files)} raw files directly for HDF5 conversion")
                 else:
                     if raw_dir is not None:
                         print(f"No XYZ table files found in custom directory {raw_dir} or patched directory {xyz_dir}")
@@ -3732,9 +3867,6 @@ def main(overwrite_existing: bool = False,
             print(f"\n🚀 Converting CSV files to HDF5 format for faster processing (PARALLEL)...")
             from data_processing.trajectory import auto_select_csv_to_hdf5_method
             
-            # Create HDF5 file name based on subject
-            hdf5_file_path = f"{subject_name}_cfd_data.h5"
-            
             # Convert to HDF5 using optimized parallel method (respects --forcererun flag)
             data_info = auto_select_csv_to_hdf5_method(xyz_files, hdf5_file_path, overwrite_existing)
             print(f"✅ HDF5 data ready: {data_info['file_path']}")
@@ -3742,12 +3874,29 @@ def main(overwrite_existing: bool = False,
         # Note: For now, we'll continue using CSV files for tracking
         # In the future, we can modify the tracking functions to use HDF5 directly
         
-        # Create interactive visualization of first time point (only if CSV files available)
-        if xyz_files:
-            print("\nCreating interactive visualization...")
-            plot_3d_interactive_all_patches(xyz_files[0], tracking_locations, subject_name, interactive_dir)
-        else:
-            print("\nSkipping interactive visualization (using HDF5 cache, no CSV files loaded)")
+        # Create interactive visualization using consistent timestep detection
+        print("\nCreating interactive visualization...")
+        
+        # Use the same timestep detection as patch highlighting
+        try:
+            visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
+            print(f"Using consistent timestep: {display_timestep}ms")
+            
+            # Try HDF5 first with the detected timestep
+            if Path(hdf5_file_path).exists():
+                print(f"📊 Using HDF5 data source: {hdf5_file_path}")
+                plot_3d_interactive_all_patches(hdf5_file_path, tracking_locations, subject_name, interactive_dir, time_point=display_timestep)
+            elif xyz_files:
+                print("📁 Using CSV data source")
+                plot_3d_interactive_all_patches(xyz_files[0], tracking_locations, subject_name, interactive_dir)
+            else:
+                print("❌ No data source available for interactive visualization")
+        except Exception as e:
+            print(f"❌ Error creating interactive visualization: {e}")
+            # Fallback to CSV if available
+            if xyz_files:
+                print("📁 Falling back to CSV for interactive visualization...")
+                plot_3d_interactive_all_patches(xyz_files[0], tracking_locations, subject_name, interactive_dir)
         
         # Process each tracking point
         print("\nProcessing tracking points...")
@@ -3764,8 +3913,8 @@ def main(overwrite_existing: bool = False,
             
             # Check if we should use HDF5 cache or CSV files
             if Path(hdf5_file_path).exists() and len(xyz_files) == 0:
-                # Use HDF5 cache for tracking (much faster)
-                single_point_data = track_point_hdf5_parallel(hdf5_file_path, patch_number, face_index)
+                # Use HDF5 cache for tracking (much faster) with auto-selection
+                single_point_data = auto_select_hdf5_point_tracking_method(hdf5_file_path, patch_number, face_index)
             else:
                 # Use parallel processing for single point tracking from CSV
                 single_point_data = track_point_parallel(xyz_files, patch_number, face_index)
@@ -3779,7 +3928,7 @@ def main(overwrite_existing: bool = False,
             # Process patch regions if enabled
             if enable_patch_analysis:
                 if patch_radii is None:
-                    patch_radii = [0.001, 0.002, 0.005]  # Default: 1mm, 2mm, 5mm
+                    patch_radii = [0.002]  # Default: 2mm only (faster processing)
                 
                 print(f"\nProcessing patch regions...")
                 print(f"Patch radii: {[f'{r*1000:.1f}mm' for r in patch_radii]}")
@@ -3817,7 +3966,7 @@ def main(overwrite_existing: bool = False,
                         patch_data = auto_select_hdf5_tracking_method(hdf5_file_path, patch_point_pairs)
                     else:
                         print(f"  📁 Using CSV files for patch tracking")
-                        patch_data = track_fixed_patch_region_parallel(xyz_files, patch_point_pairs)
+                        patch_data = track_fixed_patch_region_csv_parallel(xyz_files, patch_point_pairs)
                     
                     if patch_data:
                         print(f"  Tracked {radius_mm:.1f}mm patch through {len(patch_data)} time steps")
@@ -4296,70 +4445,8 @@ def main(overwrite_existing: bool = False,
                         visualize_func = None
             
             if visualize_func is not None:
-                # Find an appropriate timestep for this subject
-                # Use the same logic as tracking analysis - first file from breathing cycle
-                xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
-                if xyz_dir.exists():
-                    # Get available timesteps and filter by breathing cycle (same as tracking)
-                    available_files = list(xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
-                    if available_files:
-                        # Sort files in natural chronological order
-                        timestep_file_pairs = []
-                        for file_path in available_files:
-                            try:
-                                timestep = extract_timestep_from_filename(file_path)
-                                timestep_file_pairs.append((timestep, file_path))
-                            except ValueError:
-                                continue
-                        
-                        if timestep_file_pairs:
-                            # Sort by timestep value (natural chronological order)
-                            timestep_file_pairs.sort(key=lambda x: x[0])
-                            sorted_files = [file_path for timestep, file_path in timestep_file_pairs]
-                            
-                            # Filter files to only include those within the breathing cycle (same as tracking)
-                            start_time, end_time = find_breathing_cycle_bounds(subject_name)
-                            if start_time is not None and end_time is not None:
-                                filtered_files = filter_xyz_files_by_time(sorted_files, start_time, end_time)
-                                if filtered_files:
-                                    # Use the first file from the breathing cycle (same as tracking analysis)
-                                    first_file = filtered_files[0]
-                                    visualization_timestep = extract_timestep_from_filename(first_file)
-                                    
-                                    # Convert to milliseconds for display message only
-                                    if 'e+' in first_file.stem or 'e-' in first_file.stem:
-                                        # Scientific notation - likely in seconds
-                                        display_timestep = int(visualization_timestep * 1000)
-                                    else:
-                                        # Likely already in milliseconds
-                                        display_timestep = int(visualization_timestep)
-                                    
-                                    print(f"🎯 Using timestep {display_timestep}ms for patch visualization (first file in breathing cycle)")
-                                else:
-                                    print("⚠️  Warning: No files found within breathing cycle, using default 100ms")
-                                    visualization_timestep = 100
-                            else:
-                                print("⚠️  Warning: Could not determine breathing cycle bounds, using first available file")
-                                first_timestep = timestep_file_pairs[0][0]
-                                first_file = timestep_file_pairs[0][1]
-                                visualization_timestep = first_timestep
-                                
-                                # Convert to milliseconds for display message only
-                                if 'e+' in first_file.stem or 'e-' in first_file.stem:
-                                    display_timestep = int(first_timestep * 1000)
-                                else:
-                                    display_timestep = int(first_timestep)
-                                
-                                print(f"🎯 Using timestep {display_timestep}ms for patch visualization (first available file)")
-                        else:
-                            print("⚠️  Warning: No valid timesteps found, using default 100ms")
-                            visualization_timestep = 100
-                    else:
-                        print("⚠️  Warning: No patched XYZ files found, using default 100ms")
-                        visualization_timestep = 100
-                else:
-                    print("⚠️  Warning: No patched XYZ directory found, using default 100ms")
-                    visualization_timestep = 100
+                # Use consistent timestep detection logic
+                visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
                 
                 # Set patch radii if not provided
                 if patch_radii is None:
@@ -4371,7 +4458,8 @@ def main(overwrite_existing: bool = False,
                     patch_radii=patch_radii,
                     use_pipeline_data=True,  # Use pre-filtered data from pipeline
                     normal_angle_threshold=normal_angle_threshold,
-                    output_dir=str(interactive_dir)
+                    output_dir=str(interactive_dir),
+                    hdf5_file_path=hdf5_file_path  # Use HDF5 data instead of CSV
                 )
                 
                 if fig:
@@ -4530,7 +4618,7 @@ Examples:
     parser.add_argument('--disablepatchanalysis', action='store_true',
                       help='Disable patch-based region analysis (enabled by default)')
     parser.add_argument('--patchradii', nargs='+', type=float,
-                      help='Patch radii in millimeters (default: 1.0 2.0 5.0)')
+                      help='Patch radii in millimeters (default: 2.0 only for faster processing)')
     parser.add_argument('--normalangle', type=float, default=60.0,
                       help='Normal angle threshold in degrees for surface filtering (default: 60.0)')
     parser.add_argument('--disablevisualization', action='store_true',
