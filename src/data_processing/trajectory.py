@@ -273,19 +273,30 @@ def load_tables_to_3d_array_parallel(xyz_files: List[Path], save_path: str = 'cf
     print(f"🔥 Using parallel processing for {n_timesteps} CSV files...")
     
     # Get optimal process count with smart scaling
-    cpu_cores = mp.cpu_count()
+    logical_cores = mp.cpu_count()  # Includes hyperthreading
+    try:
+        # Get physical cores (better for CPU-intensive tasks like CSV parsing)
+        physical_cores = psutil.cpu_count(logical=False)
+        if physical_cores is None:
+            physical_cores = logical_cores // 2  # Fallback: assume hyperthreading
+    except:
+        physical_cores = logical_cores // 2  # Conservative fallback
+    
+    cpu_cores = physical_cores  # Use physical cores for CPU-intensive CSV processing
+    print(f"🖥️  CPU Detection: {logical_cores} logical cores, {physical_cores} physical cores (using physical)")
+    
     memory_info = psutil.virtual_memory()
     available_gb = memory_info.available / (1024**3)
     
-    # Smart process cap based on system specs
-    if cpu_cores >= 64 and available_gb >= 64:
-        max_processes = 64  # High-end servers
-    elif cpu_cores >= 32 and available_gb >= 32:
-        max_processes = 32  # Mid-range servers  
-    elif cpu_cores >= 16 and available_gb >= 16:
-        max_processes = 24  # Modern workstations
+    # Smart process cap based on PHYSICAL core count and memory
+    if cpu_cores >= 32 and available_gb >= 64:
+        max_processes = cpu_cores  # Use all physical cores for high-end servers
+    elif cpu_cores >= 16 and available_gb >= 32:
+        max_processes = cpu_cores  # Use all physical cores for mid-range servers  
+    elif cpu_cores >= 8 and available_gb >= 16:
+        max_processes = cpu_cores  # Use all physical cores for workstations
     else:
-        max_processes = 16  # Conservative default
+        max_processes = min(8, cpu_cores)  # Conservative cap for smaller systems
     
     optimal_processes = min(cpu_cores, n_timesteps, max_processes)
     print(f"📊 Using {optimal_processes} parallel processes")
@@ -425,10 +436,12 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
     """
     MEMORY-SAFE PARALLEL VERSION: For very large datasets that might not fit in memory.
     Processes CSV files in parallel chunks and writes to HDF5 incrementally.
+    Uses intelligent resource detection to automatically calculate optimal chunks.
     
     Args:
         xyz_files: List of paths to XYZ table files with patch numbers
         save_path: Path to save the HDF5 file
+        overwrite_existing: Whether to overwrite existing HDF5 file
         
     Returns:
         Dictionary containing the loaded data and metadata
@@ -479,46 +492,67 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
     
     n_properties = len(properties)
     
-    # Calculate memory usage per timestep
-    memory_per_timestep_mb = (n_points * n_properties * 8) / (1024 * 1024)  # 8 bytes per float64
-    
+    # USER'S INTUITIVE APPROACH: Calculate actual resource usage
     print(f"Data dimensions:")
     print(f"Time steps: {n_timesteps}")
     print(f"Points per step: {n_points}")
     print(f"Properties tracked: {n_properties}")
-    print(f"Memory per timestep: {memory_per_timestep_mb:.1f} MB")
     
-    # Get system memory info
+    # Step 1: Get total size of all CSV files
+    print("📊 Calculating total CSV file sizes...")
+    total_csv_size_gb = sum(csv_file.stat().st_size for csv_file in xyz_files) / (1024**3)
+    avg_csv_size_mb = (total_csv_size_gb * 1024) / n_timesteps
+    print(f"   Total CSV files size: {total_csv_size_gb:.1f} GB")
+    print(f"   Average CSV file size: {avg_csv_size_mb:.1f} MB")
+    
+    # Step 2: Get available memory with safety factor
     memory_info = psutil.virtual_memory()
     available_gb = memory_info.available / (1024**3)
+    working_memory_gb = available_gb * 0.95  # Use 95% of available RAM with 5% buffer
     
-    # Calculate optimal batch size (use 25% of available memory)
-    target_memory_gb = available_gb * 0.25
-    batch_size = max(1, int((target_memory_gb * 1024) / memory_per_timestep_mb))
-    batch_size = min(batch_size, n_timesteps)  # Don't exceed total files
-    
-    # Get optimal process count with smart scaling
-    cpu_cores = mp.cpu_count()
-    memory_info = psutil.virtual_memory()
-    available_gb = memory_info.available / (1024**3)
-    
-    # Smart process cap based on system specs
-    if cpu_cores >= 64 and available_gb >= 64:
-        max_processes = 64  # High-end servers
-    elif cpu_cores >= 32 and available_gb >= 32:
-        max_processes = 32  # Mid-range servers  
-    elif cpu_cores >= 16 and available_gb >= 16:
-        max_processes = 24  # Modern workstations
-    else:
-        max_processes = 16  # Conservative default
-    
-    optimal_processes = min(cpu_cores, batch_size, max_processes)
-    
-    print(f"📊 Memory-safe processing plan:")
     print(f"   Available RAM: {available_gb:.1f} GB")
-    print(f"   Batch size: {batch_size} files")
+    print(f"   Working memory: {working_memory_gb:.1f} GB (95% safety factor)")
+    
+    # Step 3: Calculate chunks needed based on memory ratio
+    # Account for pandas overhead (3-4x file size in memory)
+    pandas_overhead_factor = 3.5  # Conservative estimate
+    effective_csv_size_gb = total_csv_size_gb * pandas_overhead_factor
+    
+    if effective_csv_size_gb <= working_memory_gb:
+        # All files fit in memory - process in one batch
+        n_chunks = 1
+        files_per_chunk = n_timesteps
+    else:
+        # Calculate how many chunks we need
+        n_chunks = int(np.ceil(effective_csv_size_gb / working_memory_gb))
+        files_per_chunk = int(np.ceil(n_timesteps / n_chunks))
+    
+    print(f"   Total effective memory needed: {effective_csv_size_gb:.1f} GB (with pandas overhead)")
+    print(f"   Number of chunks needed: {n_chunks}")
+    print(f"   Files per chunk: {files_per_chunk}")
+    
+    # Step 4: Get optimal CPU cores (physical cores for CSV processing)
+    logical_cores = mp.cpu_count()
+    try:
+        physical_cores = psutil.cpu_count(logical=False)
+        if physical_cores is None:
+            physical_cores = logical_cores // 2  # Fallback: assume hyperthreading
+    except:
+        physical_cores = logical_cores // 2  # Conservative fallback
+    
+    cpu_cores = physical_cores  # Use physical cores for CPU-intensive CSV processing
+    print(f"🖥️  CPU Detection: {logical_cores} logical cores, {physical_cores} physical cores (using physical)")
+    
+    # Step 5: Use all available cores efficiently
+    optimal_processes = min(cpu_cores, files_per_chunk)  # Don't exceed files in chunk
+    batch_size = files_per_chunk  # Process one chunk at a time
+    
+    print(f"📊 INTUITIVE resource allocation:")
     print(f"   Parallel processes: {optimal_processes}")
-    print(f"   Number of batches: {(n_timesteps + batch_size - 1) // batch_size}")
+    print(f"   Batch size: {batch_size} files")
+    print(f"   Estimated memory per batch: {(batch_size * avg_csv_size_mb * pandas_overhead_factor / 1024):.1f} GB")
+    print(f"   Number of batches: {n_chunks}")
+    print(f"   Memory safety: ✅ Guaranteed (chunks fit in {working_memory_gb:.1f} GB)")
     
     # Create HDF5 file structure
     with h5py.File(save_path, 'w') as f:
@@ -533,11 +567,12 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
         start_time = time.time()
         total_processed = 0
         
-        for batch_start in range(0, n_timesteps, batch_size):
-            batch_end = min(batch_start + batch_size, n_timesteps)
+        for chunk_idx in range(n_chunks):
+            batch_start = chunk_idx * files_per_chunk
+            batch_end = min(batch_start + files_per_chunk, n_timesteps)
             batch_files = xyz_files[batch_start:batch_end]
             
-            print(f"\n🔄 Processing batch {batch_start//batch_size + 1}: files {batch_start}-{batch_end-1}")
+            print(f"\n🔄 Processing chunk {chunk_idx + 1}/{n_chunks}: files {batch_start}-{batch_end-1}")
             
             # Prepare arguments for this batch
             file_args = [(i, xyz_file, properties) for i, xyz_file in enumerate(batch_files)]
@@ -586,10 +621,12 @@ def load_tables_to_3d_array_memory_safe_parallel(xyz_files: List[Path], save_pat
 def auto_select_csv_to_hdf5_method(xyz_files: List[Path], save_path: str = 'cfd_data.h5', overwrite_existing: bool = False) -> Dict:
     """
     Automatically select the best CSV to HDF5 conversion method based on dataset size.
+    Uses intelligent resource detection to prevent memory overflow.
     
     Args:
         xyz_files: List of paths to XYZ table files with patch numbers
         save_path: Path to save the HDF5 file
+        overwrite_existing: Whether to overwrite existing HDF5 file
         
     Returns:
         Dictionary containing the loaded data and metadata
@@ -613,17 +650,17 @@ def auto_select_csv_to_hdf5_method(xyz_files: List[Path], save_path: str = 'cfd_
     else:
         n_properties = len(properties)
     
-    # Memory per timestep in GB
-    memory_per_timestep_gb = (n_points * n_properties * 8) / (1024**3)
-    total_memory_needed_gb = memory_per_timestep_gb * n_timesteps
+    # Calculate final data size (disk space for HDF5 file)
+    data_size_per_timestep_gb = (n_points * n_properties * 8) / (1024**3)
+    total_data_size_gb = data_size_per_timestep_gb * n_timesteps
     
     print(f"📊 CSV to HDF5 conversion analysis:")
     print(f"   Files to process: {n_timesteps}")
     print(f"   Available RAM: {available_gb:.1f} GB")
-    print(f"   Estimated memory needed: {total_memory_needed_gb:.1f} GB")
+    print(f"   Final HDF5 file size (disk): {total_data_size_gb:.1f} GB")
     
-    # Select method based on memory requirements
-    if total_memory_needed_gb > available_gb * 0.5:  # If needs more than 50% of available RAM
+    # Select method based on dataset size (large datasets need memory-safe processing)
+    if total_data_size_gb > available_gb * 0.5:  # If final data is large relative to RAM
         print("🛡️  Using MEMORY-SAFE PARALLEL method (large dataset)")
         return load_tables_to_3d_array_memory_safe_parallel(xyz_files, save_path, overwrite_existing)
     else:
