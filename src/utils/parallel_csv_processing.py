@@ -766,9 +766,66 @@ def calculate_optimal_chunk_size(hdf5_file_path: str, target_memory_gb: float = 
     return calculate_safe_chunk_size(hdf5_file_path, target_memory_gb)
 
 
+def get_physical_cpu_count() -> Tuple[int, int]:
+    """
+    Get both physical and logical CPU core counts.
+    
+    Returns:
+        Tuple of (physical_cores, logical_cores)
+    """
+    import platform
+    logical_cores = mp.cpu_count()
+    
+    # Try to detect physical cores on Linux
+    if platform.system() == "Linux":
+        try:
+            # Method 1: Use /proc/cpuinfo to count unique physical IDs
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+            
+            # Count unique physical processor IDs
+            physical_ids = set()
+            cores_per_socket = set()
+            
+            for line in cpuinfo.split('\n'):
+                if line.startswith('physical id'):
+                    phys_id = line.split(':')[1].strip()
+                    physical_ids.add(phys_id)
+                elif line.startswith('cpu cores'):
+                    cores = int(line.split(':')[1].strip())
+                    cores_per_socket.add(cores)
+            
+            if physical_ids and cores_per_socket:
+                # Physical cores = sockets × cores_per_socket
+                num_sockets = len(physical_ids)
+                cores_per_socket = max(cores_per_socket) if cores_per_socket else 1
+                physical_cores = num_sockets * cores_per_socket
+                
+                if physical_cores > 0 and physical_cores <= logical_cores:
+                    return physical_cores, logical_cores
+        
+        except (FileNotFoundError, ValueError, IndexError):
+            pass
+        
+        # Method 2: Check if hyperthreading is enabled (common case: logical = 2 × physical)
+        try:
+            # If logical cores is exactly 2x a reasonable number, assume hyperthreading
+            if logical_cores % 2 == 0 and logical_cores >= 4:
+                potential_physical = logical_cores // 2
+                # Sanity check: physical cores should be reasonable (1-128 range for most systems)
+                if 1 <= potential_physical <= 128:
+                    return potential_physical, logical_cores
+        except:
+            pass
+    
+    # Fallback: assume logical cores are physical cores (conservative)
+    return logical_cores, logical_cores
+
+
 def get_optimal_process_count(file_size_mb: float = 600, available_memory_gb: float = None) -> int:
     """
     Determine optimal number of processes based on system resources.
+    Uses physical CPU cores on Linux systems to avoid hyperthreading contention.
     
     Args:
         file_size_mb: Average file size in MB
@@ -777,8 +834,9 @@ def get_optimal_process_count(file_size_mb: float = 600, available_memory_gb: fl
     Returns:
         Optimal number of processes
     """
-    # Get system info
-    cpu_count = mp.cpu_count()
+    # Get system info - prefer physical cores for CPU-intensive tasks
+    physical_cores, logical_cores = get_physical_cpu_count()
+    cpu_count = physical_cores  # Use physical cores for optimal performance
     
     if available_memory_gb is None:
         # Get available memory
@@ -806,7 +864,10 @@ def get_optimal_process_count(file_size_mb: float = 600, available_memory_gb: fl
     optimal_processes = min(memory_limited_processes, cpu_limited_processes, max_processes)
     
     print(f"System resources detected:")
-    print(f"  CPU cores: {cpu_count}")
+    if physical_cores != logical_cores:
+        print(f"  CPU cores: {physical_cores} physical ({logical_cores} logical with hyperthreading)")
+    else:
+        print(f"  CPU cores: {cpu_count}")
     print(f"  Available memory: {available_memory_gb:.1f} GB")
     print(f"  Memory-limited processes: {memory_limited_processes}")
     print(f"  CPU-limited processes: {cpu_limited_processes}")
