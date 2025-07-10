@@ -95,6 +95,139 @@ except ImportError as e:
     print(f"Warning: Could not import CFD analysis functions: {e}")
     CFD_ANALYSIS_AVAILABLE = False
 
+
+def smart_label_position(ax, target_xy, text, existing_labels, data_points=None, 
+                        margin_factor=0.08, min_distance=0.15):
+    """
+    Zone-based label positioning that guarantees no overlaps by using the entire plot area.
+    
+    Args:
+        ax: matplotlib axis object
+        target_xy: (x, y) tuple of the target point to annotate
+        text: the text to display
+        existing_labels: list of existing label positions [(x, y), ...]
+        data_points: optional array of data points to avoid (less important now)
+        margin_factor: fraction of plot range to use as margin from edges
+        min_distance: minimum distance between labels (fraction of plot range)
+    
+    Returns:
+        (xytext, ha, va): position and alignment for the label
+    """
+    x_target, y_target = target_xy
+    
+    # Get plot boundaries
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    x_range = xlim[1] - xlim[0]
+    y_range = ylim[1] - ylim[0]
+    
+    # Calculate margins and minimum distance
+    x_margin = margin_factor * x_range
+    y_margin = margin_factor * y_range
+    min_dist = min_distance * min(x_range, y_range)
+    
+    # Estimate text bounding box for the larger font size
+    font_size = 11  # Increased by 20% from 9 to ~11
+    char_width = font_size * 0.6
+    char_height = font_size * 1.2
+    text_width = len(text) * char_width
+    text_height = char_height
+    
+    # Convert text dimensions to data coordinates
+    text_width_data = text_width * x_range / 800
+    text_height_data = text_height * y_range / 600
+    
+    # Define strategic zones across the entire plot area
+    # Use 6x4 grid of zones to distribute labels evenly
+    zones = []
+    n_cols = 6
+    n_rows = 4
+    
+    for row in range(n_rows):
+        for col in range(n_cols):
+            # Calculate zone center
+            zone_x = xlim[0] + x_margin + (col + 0.5) * (x_range - 2*x_margin) / n_cols
+            zone_y = ylim[0] + y_margin + (row + 0.5) * (y_range - 2*y_margin) / n_rows
+            
+            # Determine alignment based on zone position
+            if col < n_cols // 3:
+                ha = 'left'
+            elif col >= 2 * n_cols // 3:
+                ha = 'right'
+            else:
+                ha = 'center'
+                
+            if row < n_rows // 2:
+                va = 'bottom'
+            else:
+                va = 'top'
+            
+            # Calculate priority based on distance to target (closer zones preferred)
+            distance_to_target = np.sqrt((zone_x - x_target)**2 + (zone_y - y_target)**2)
+            
+            zones.append({
+                'x': zone_x,
+                'y': zone_y,
+                'ha': ha,
+                'va': va,
+                'priority': distance_to_target
+            })
+    
+    # Sort zones by priority (closer to target first, but we'll use any available zone)
+    zones.sort(key=lambda z: z['priority'])
+    
+    def is_zone_available(zone):
+        x, y, ha, va = zone['x'], zone['y'], zone['ha'], zone['va']
+        
+        # Calculate actual text bounds
+        if ha == 'left':
+            text_x_min, text_x_max = x, x + text_width_data
+        elif ha == 'right':
+            text_x_min, text_x_max = x - text_width_data, x
+        else:  # center
+            text_x_min, text_x_max = x - text_width_data/2, x + text_width_data/2
+            
+        if va == 'bottom':
+            text_y_min, text_y_max = y, y + text_height_data
+        elif va == 'top':
+            text_y_min, text_y_max = y - text_height_data, y
+        else:  # center
+            text_y_min, text_y_max = y - text_height_data/2, y + text_height_data/2
+        
+        # Check boundaries
+        if (text_x_min < xlim[0] + x_margin or text_x_max > xlim[1] - x_margin or 
+            text_y_min < ylim[0] + y_margin or text_y_max > ylim[1] - y_margin):
+            return False
+        
+        # Check distance from existing labels - this is the critical part for no overlaps
+        for existing_x, existing_y in existing_labels:
+            distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+            if distance < min_dist:
+                return False
+        
+        return True
+    
+    # Try zones in order until we find an available one
+    for zone in zones:
+        if is_zone_available(zone):
+            return (zone['x'], zone['y']), zone['ha'], zone['va']
+    
+    # If all zones are somehow occupied (very unlikely with 24 zones), 
+    # use a fallback position at the edge
+    fallback_x = xlim[1] - x_margin - text_width_data/2
+    fallback_y = ylim[1] - y_margin - text_height_data/2
+    return (fallback_x, fallback_y), 'right', 'top'
+
+
+def format_time_label(time_value):
+    """Format time values to remove unnecessary decimal places."""
+    if time_value == int(time_value):
+        return f"{int(time_value)}s"
+    else:
+        # Remove trailing zeros and unnecessary decimal places
+        return f"{time_value:.2f}s".rstrip('0').rstrip('.')
+
+
 def calculate_surface_normal(points: np.ndarray, center_idx: int, k: int = 10) -> np.ndarray:
     """
     Calculate surface normal at a point using local neighborhood PCA.
@@ -938,11 +1071,15 @@ def create_airway_surface_velocity_plot(df, subject_name, description, patch_num
         ax1.text(marker['time'], ax1.get_ylim()[1]*0.9, marker['label'], 
                 rotation=90, verticalalignment='top', fontsize=10)
     
-    ax1.set_ylabel('Velocity (mm/s)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Velocity (mm/s)', fontsize=14.4, fontweight='bold')
     ax1.set_title(f'Airway Surface Velocity at {description}\nPatch: {patch_number}, Face: {face_index}', 
                  fontsize=14, fontweight='bold')
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper right')
+    # Format tick labels
+    ax1.tick_params(axis='both', which='major', labelsize=13.44)
+    for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+        label.set_fontweight('bold')
     
     # Plot 2: Individual velocity components
     ax2.plot(df['Time (s)'], df['Velocity[i] (m/s)'] * 1000, 'r-', linewidth=1.5, label='v_x')
@@ -953,10 +1090,14 @@ def create_airway_surface_velocity_plot(df, subject_name, description, patch_num
     for marker in cycle_markers:
         ax2.axvline(x=marker['time'], color='k', linestyle=':', alpha=0.7)
     
-    ax2.set_xlabel('Time (s)', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('|v⃗| (mm/s)', fontsize=12, fontweight='bold')
+    ax2.set_xlabel('Time (s)', fontsize=14.4, fontweight='bold')
+    ax2.set_ylabel('|v⃗| (mm/s)', fontsize=14.4, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper right')
+    # Format tick labels
+    ax2.tick_params(axis='both', which='major', labelsize=13.44)
+    for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+        label.set_fontweight('bold')
     
     # Adjust layout
     plt.tight_layout()
@@ -1282,8 +1423,8 @@ def create_correlation_analysis_plot(df, subject_name, description, patch_number
                        linestyle=style['linestyle'],
                        linewidth=1.5)
         
-        ax_raw.set_xlabel('Time (s)', fontsize=12, labelpad=10)
-        ax_raw.set_ylabel('Normalized Values', fontsize=12, labelpad=10)
+        ax_raw.set_xlabel('Time (s)', fontsize=14.4, fontweight='bold', labelpad=10)
+        ax_raw.set_ylabel('Normalized Values', fontsize=14.4, fontweight='bold', labelpad=10)
         ax_raw.set_title(f'Raw Data Overlay (Normalized)\n{description} - Patch {patch_number}, Face {face_index}', 
                         fontsize=14, pad=20)
         ax_raw.grid(True, alpha=0.3)
@@ -1311,10 +1452,10 @@ def create_correlation_analysis_plot(df, subject_name, description, patch_number
                     linestyle=style['linestyle'],
                     alpha=0.8,
                     linewidth=2,
-                    label=f'Pressure-{name}')
-            
-            ax.set_xlabel('Time (s)', fontsize=12, labelpad=10)
-            ax.set_ylabel('Correlation', fontsize=12, labelpad=10)
+                                          label=f'Pressure-{name}')
+              
+            ax.set_xlabel('Time (s)', fontsize=14.4, fontweight='bold', labelpad=10)
+            ax.set_ylabel('Correlation', fontsize=14.4, fontweight='bold', labelpad=10)
             ax.set_title(f'Pressure vs {name}\n{description} - Patch {patch_number}, Face {face_index}', 
                         fontsize=14, pad=20)
             ax.grid(True, alpha=0.3)
@@ -1471,8 +1612,8 @@ def create_dpdt_vs_dadt_plot(df, subject_name, description, patch_number, face_i
     cbar.set_label('Time (s)', fontsize=12)
     
     # Add labels and title
-    plt.xlabel('Rate of change of acceleration (dA/dt) [mm/s³]', fontsize=12, fontweight='bold')
-    plt.ylabel('Rate of change of pressure (dP/dt) [Pa/s]', fontsize=12, fontweight='bold')
+    plt.xlabel('Rate of change of acceleration (dA/dt) [mm/s³]', fontsize=14.4, fontweight='bold')
+    plt.ylabel('Rate of change of pressure (dP/dt) [Pa/s]', fontsize=14.4, fontweight='bold')
     plt.title(f'Rate of Change Analysis: dP/dt vs dA/dt\n{description} - Patch {patch_number}, Face {face_index}', 
               fontsize=14, fontweight='bold')
     
@@ -1483,6 +1624,11 @@ def create_dpdt_vs_dadt_plot(df, subject_name, description, patch_number, face_i
     # Add grid
     plt.grid(True, alpha=0.3)
     
+    # Format tick labels
+    plt.gca().tick_params(axis='both', which='major', labelsize=13.44)
+    for label in plt.gca().get_xticklabels() + plt.gca().get_yticklabels():
+        label.set_fontweight('bold')
+    
     # Tight layout and save
     plt.tight_layout()
     pdf.savefig(fig, bbox_inches='tight')
@@ -1491,7 +1637,7 @@ def create_dpdt_vs_dadt_plot(df, subject_name, description, patch_number, face_i
 def create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, pdf):
     """Create a plot showing various metrics over time."""
     # Common settings
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 13.44  # Reduced by 20% from 16.8
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Get data
@@ -1810,7 +1956,7 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
     p_max *= 1.05
     
     # Common settings for all subplots
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 11.2  # Reduced by 20% from 14
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Create a custom colormap that transitions at the normalized inhale-exhale point
@@ -1864,6 +2010,10 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax1.grid(True, alpha=0.3)
+        # Format tick labels
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 2. Plot p vs a
         ax2 = fig.add_subplot(gs[i, 1])
@@ -1876,6 +2026,10 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax2.grid(True, alpha=0.3)
+        # Format tick labels
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 3. Plot v vs a
         ax3 = fig.add_subplot(gs[i, 2])
@@ -1888,6 +2042,10 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax3.grid(True, alpha=0.3)
+        # Format tick labels
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
     
     # Add a colorbar for time
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
@@ -2021,7 +2179,7 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
     p_max *= 1.05
     
     # Common settings for all subplots
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 11.2  # Reduced by 20% from 14
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Create a custom colormap that transitions at the normalized inhale-exhale point
@@ -2077,6 +2235,10 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax1.grid(True, alpha=0.3)
+        # Format tick labels
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Add markers for zero crossings
         for t_normalized in vel_zero_normalized:
@@ -2104,6 +2266,10 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax2.grid(True, alpha=0.3)
+        # Format tick labels
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Add markers for zero crossings
         for t_normalized in vel_zero_normalized:
@@ -2130,6 +2296,10 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax3.grid(True, alpha=0.3)
+        # Format tick labels
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Add markers for zero crossings
         for t_normalized in vel_zero_normalized:
@@ -2310,7 +2480,7 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
     p_max *= 1.05
     
     # Common settings for all subplots
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 11.2  # Reduced by 20% from 14
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Create a custom colormap that transitions at the normalized inhale-exhale point
@@ -2364,6 +2534,10 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]} (Smoothed)', fontsize=TITLE_SIZE, fontweight='bold')
         ax1.grid(True, alpha=0.3)
+        # Format tick labels
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Mark inhale-exhale transition point
         inhale_exhale_idx = np.abs(normalized_times - normalized_inhale_exhale).argmin()
@@ -2380,6 +2554,10 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]} (Smoothed)', fontsize=TITLE_SIZE, fontweight='bold')
         ax2.grid(True, alpha=0.3)
+        # Format tick labels
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Mark inhale-exhale transition point
         ax2.plot(adotn_smooth_mm[inhale_exhale_idx], pressure_smooth[inhale_exhale_idx], '*', color='black', markersize=12)
@@ -2395,6 +2573,10 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]} (Smoothed)', fontsize=TITLE_SIZE, fontweight='bold')
         ax3.grid(True, alpha=0.3)
+        # Format tick labels
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
         
         # Mark inhale-exhale transition point
         ax3.plot(adotn_smooth_mm[inhale_exhale_idx], vdotn_smooth_mm[inhale_exhale_idx], '*', color='black', markersize=12)
@@ -2555,7 +2737,7 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     p_max *= 1.05
     
     # Common settings for all subplots
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 11.2  # Reduced by 20% from 14
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Create a custom colormap that transitions at the normalized inhale-exhale point
@@ -2595,6 +2777,11 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         a_crossings = data['a_crossings']
         p_crossings = data['p_crossings']
         
+        # Initialize label tracking for collision detection
+        ax1_labels = []
+        ax2_labels = []
+        ax3_labels = []
+        
         # 1. Plot p vs v
         ax1 = fig.add_subplot(gs[i, 0])
         scatter1 = ax1.scatter(vdotn, pressure, c=normalized_times, cmap=custom_cmap, norm=norm)
@@ -2604,29 +2791,43 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         # Mark the zero crossings in the p vs v plot
         for v_cross in v_crossings:
             t_idx = np.abs(normalized_times - v_cross).argmin()
-            # Mark v=0 crossings with vertical lines
-            ax1.axvline(x=0, ymin=0.45, ymax=0.55, color='red', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - v_cross)).argmin()
             p_at_cross = pressure[idx_at_cross]
-            ax1.annotate(f"{v_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(vdotn, pressure))
+            time_label = format_time_label(v_cross)
+            xytext, ha, va = smart_label_position(ax1, (0, p_at_cross), time_label, 
+                                                ax1_labels, data_points)
+            ax1_labels.append(xytext)
+            
+            ax1.annotate(time_label, 
                        xy=(0, p_at_cross), 
-                       xytext=(0.1*v_max, p_at_cross + 0.1*p_max),
-                       arrowprops=dict(arrowstyle="->", color='red'),
-                       color='red', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         for p_cross in p_crossings:
             t_idx = np.abs(normalized_times - p_cross).argmin()
-            # Mark p=0 crossings with horizontal lines
-            ax1.axhline(y=0, xmin=0.45, xmax=0.55, color='blue', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - p_cross)).argmin()
             v_at_cross = vdotn[idx_at_cross]
-            ax1.annotate(f"{p_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(vdotn, pressure))
+            time_label = format_time_label(p_cross)
+            xytext, ha, va = smart_label_position(ax1, (v_at_cross, 0), time_label, 
+                                                ax1_labels, data_points)
+            ax1_labels.append(xytext)
+            
+            ax1.annotate(time_label, 
                        xy=(v_at_cross, 0), 
-                       xytext=(v_at_cross - 0.1*v_max, -0.1*p_max),
-                       arrowprops=dict(arrowstyle="->", color='blue'),
-                       color='blue', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         ax1.set_xlim(-v_max, v_max)
         ax1.set_ylim(-p_max, p_max)
@@ -2634,6 +2835,10 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax1.grid(True, alpha=0.3)
+        # Format tick labels
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 2. Plot p vs a
         ax2 = fig.add_subplot(gs[i, 1])
@@ -2644,29 +2849,43 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         # Mark the zero crossings in the p vs a plot
         for a_cross in a_crossings:
             t_idx = np.abs(normalized_times - a_cross).argmin()
-            # Mark a=0 crossings with vertical lines
-            ax2.axvline(x=0, ymin=0.45, ymax=0.55, color='red', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - a_cross)).argmin()
             p_at_cross = pressure[idx_at_cross]
-            ax2.annotate(f"{a_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(adotn, pressure))
+            time_label = format_time_label(a_cross)
+            xytext, ha, va = smart_label_position(ax2, (0, p_at_cross), time_label, 
+                                                ax2_labels, data_points)
+            ax2_labels.append(xytext)
+            
+            ax2.annotate(time_label, 
                        xy=(0, p_at_cross), 
-                       xytext=(0.1*a_max, p_at_cross + 0.1*p_max),
-                       arrowprops=dict(arrowstyle="->", color='red'),
-                       color='red', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         for p_cross in p_crossings:
             t_idx = np.abs(normalized_times - p_cross).argmin()
-            # Mark p=0 crossings with horizontal lines
-            ax2.axhline(y=0, xmin=0.45, xmax=0.55, color='blue', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - p_cross)).argmin()
             a_at_cross = adotn[idx_at_cross]
-            ax2.annotate(f"{p_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(adotn, pressure))
+            time_label = format_time_label(p_cross)
+            xytext, ha, va = smart_label_position(ax2, (a_at_cross, 0), time_label, 
+                                                ax2_labels, data_points)
+            ax2_labels.append(xytext)
+            
+            ax2.annotate(time_label, 
                        xy=(a_at_cross, 0), 
-                       xytext=(a_at_cross - 0.1*a_max, -0.1*p_max),
-                       arrowprops=dict(arrowstyle="->", color='blue'),
-                       color='blue', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         ax2.set_xlim(-a_max, a_max)
         ax2.set_ylim(-p_max, p_max)
@@ -2674,6 +2893,10 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax2.grid(True, alpha=0.3)
+        # Format tick labels
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 3. Plot v vs a
         ax3 = fig.add_subplot(gs[i, 2])
@@ -2684,29 +2907,43 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         # Mark the zero crossings in the v vs a plot
         for v_cross in v_crossings:
             t_idx = np.abs(normalized_times - v_cross).argmin()
-            # Mark v=0 crossings with horizontal lines
-            ax3.axhline(y=0, xmin=0.45, xmax=0.55, color='green', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - v_cross)).argmin()
             a_at_cross = adotn[idx_at_cross]
-            ax3.annotate(f"{v_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(adotn, vdotn))
+            time_label = format_time_label(v_cross)
+            xytext, ha, va = smart_label_position(ax3, (a_at_cross, 0), time_label, 
+                                                ax3_labels, data_points)
+            ax3_labels.append(xytext)
+            
+            ax3.annotate(time_label, 
                        xy=(a_at_cross, 0), 
-                       xytext=(a_at_cross + 0.1*a_max, 0.1*v_max),
-                       arrowprops=dict(arrowstyle="->", color='green'),
-                       color='green', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='green', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         for a_cross in a_crossings:
             t_idx = np.abs(normalized_times - a_cross).argmin()
-            # Mark a=0 crossings with vertical lines
-            ax3.axvline(x=0, ymin=0.45, ymax=0.55, color='purple', linewidth=2)
             # Add a timestamp label to the marker
             idx_at_cross = (np.abs(normalized_times - a_cross)).argmin()
             v_at_cross = vdotn[idx_at_cross]
-            ax3.annotate(f"{a_cross:.2f}s", 
+            
+            # Use smart positioning
+            data_points = list(zip(adotn, vdotn))
+            time_label = format_time_label(a_cross)
+            xytext, ha, va = smart_label_position(ax3, (0, v_at_cross), time_label, 
+                                                ax3_labels, data_points)
+            ax3_labels.append(xytext)
+            
+            ax3.annotate(time_label, 
                        xy=(0, v_at_cross), 
-                       xytext=(-0.1*a_max, v_at_cross - 0.1*v_max),
-                       arrowprops=dict(arrowstyle="->", color='purple'),
-                       color='purple', fontsize=10)
+                       xytext=xytext,
+                       arrowprops=dict(arrowstyle="->", color='purple', lw=1.5),
+                       color='black', fontsize=11, fontweight='bold',
+                       ha=ha, va=va)
         
         ax3.set_xlim(-a_max, a_max)
         ax3.set_ylim(-v_max, v_max)
@@ -2714,6 +2951,10 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax3.grid(True, alpha=0.3)
+        # Format tick labels
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
     
     # Add a colorbar for time
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
@@ -2817,10 +3058,13 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
     ax6 = fig.add_subplot(gs[1, 2])  # Time series plot with flow rate and velocities
             
             # Common style settings for all subplots
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 13.44  # Reduced by 20% from 16.8  
     TITLE_SIZE = 17  # Increased by 20% from 14
     for ax in [ax1, ax2, ax3, ax4, ax5, ax6]:
                 ax.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+                # Make tick labels bold
+                for label in ax.get_xticklabels() + ax.get_yticklabels():
+                    label.set_fontweight('bold')
                 ax.xaxis.set_major_locator(plt.MaxNLocator(5))  # Reduce number of x-ticks
                 ax.yaxis.set_major_locator(plt.MaxNLocator(5))  # Reduce number of y-ticks
                 ax.xaxis.label.set_fontsize(LABEL_SIZE * 1.1)
@@ -3047,7 +3291,11 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
                                     'k-', label='Flow Rate', linewidth=2)
     ax6_flow.set_xlabel('Time (s)')
     ax6_flow.set_ylabel('Mass Flow Rate (kg/s)', color='k')
-    ax6_flow.tick_params(axis='y', labelcolor='k')
+    ax6_flow.tick_params(axis='y', labelcolor='k', labelsize=13.44)
+    ax6_flow.tick_params(axis='x', labelsize=13.44)
+    # Make tick labels bold
+    for label in ax6_flow.get_xticklabels() + ax6_flow.get_yticklabels():
+        label.set_fontweight('bold')
             
             # Calculate and plot signed velocity
     signed_velocity = velocities * np.sign(vdotn)
@@ -3057,7 +3305,10 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
                                    label='v⃗·n⃗', linewidth=1.5)
             
     ax6_vel.set_ylabel('Velocity (m/s)', color='b')
-    ax6_vel.tick_params(axis='y', labelcolor='b')
+    ax6_vel.tick_params(axis='y', labelcolor='b', labelsize=13.44)
+    # Make tick labels bold  
+    for label in ax6_vel.get_yticklabels():
+        label.set_fontweight('bold')
             
             # Add grid and title
     ax6_flow.grid(True, alpha=0.3)
@@ -3227,8 +3478,8 @@ def create_clean_flow_profile_plot(subject_name, output_dir=None, pdfs_dir=None)
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="red", alpha=0.8))
     
     # Add labels and title
-    ax.set_xlabel('Time (s)', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Flow Rate (L/min)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Time (s)', fontsize=16.8, fontweight='bold')
+    ax.set_ylabel('Flow Rate (L/min)', fontsize=16.8, fontweight='bold')
     ax.set_title(f'Clean Breathing Cycle Flow Profile - {subject_name}', fontsize=16, fontweight='bold')
     
     # Add a note about the normalized time
@@ -3239,6 +3490,10 @@ def create_clean_flow_profile_plot(subject_name, output_dir=None, pdfs_dir=None)
     # Add grid and legend
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper right', fontsize=12)
+    # Format tick labels
+    ax.tick_params(axis='both', which='major', labelsize=13.44)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight('bold')
     
     # Adjust layout
     plt.tight_layout(rect=[0, 0.03, 1, 1])

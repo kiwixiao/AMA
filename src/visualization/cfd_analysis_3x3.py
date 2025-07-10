@@ -19,7 +19,139 @@ from scipy.signal import savgol_filter
 from pathlib import Path
 from typing import Dict, List, Optional
 import json
+import matplotlib.colors as mcolors
 
+
+def smart_label_position(ax, target_xy, text, existing_labels, data_points=None, 
+                        margin_factor=0.08, min_distance=0.15):
+    """
+    Zone-based label positioning that guarantees no overlaps by using the entire plot area.
+    
+    Args:
+        ax: matplotlib axis object
+        target_xy: (x, y) tuple of the target point to annotate
+        text: the text to display
+        existing_labels: list of existing label positions [(x, y), ...]
+        data_points: optional array of data points to avoid (less important now)
+        margin_factor: fraction of plot range to use as margin from edges
+        min_distance: minimum distance between labels (fraction of plot range)
+    
+    Returns:
+        (xytext, ha, va): position and alignment for the label
+    """
+    x_target, y_target = target_xy
+    
+    # Get plot boundaries
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    x_range = xlim[1] - xlim[0]
+    y_range = ylim[1] - ylim[0]
+    
+    # Calculate margins and minimum distance
+    x_margin = margin_factor * x_range
+    y_margin = margin_factor * y_range
+    min_dist = min_distance * min(x_range, y_range)
+    
+    # Estimate text bounding box for the larger font size
+    font_size = 11  # Increased by 20% from 9 to ~11
+    char_width = font_size * 0.6
+    char_height = font_size * 1.2
+    text_width = len(text) * char_width
+    text_height = char_height
+    
+    # Convert text dimensions to data coordinates
+    text_width_data = text_width * x_range / 800
+    text_height_data = text_height * y_range / 600
+    
+    # Define strategic zones across the entire plot area
+    # Use 6x4 grid of zones to distribute labels evenly
+    zones = []
+    n_cols = 6
+    n_rows = 4
+    
+    for row in range(n_rows):
+        for col in range(n_cols):
+            # Calculate zone center
+            zone_x = xlim[0] + x_margin + (col + 0.5) * (x_range - 2*x_margin) / n_cols
+            zone_y = ylim[0] + y_margin + (row + 0.5) * (y_range - 2*y_margin) / n_rows
+            
+            # Determine alignment based on zone position
+            if col < n_cols // 3:
+                ha = 'left'
+            elif col >= 2 * n_cols // 3:
+                ha = 'right'
+            else:
+                ha = 'center'
+                
+            if row < n_rows // 2:
+                va = 'bottom'
+            else:
+                va = 'top'
+            
+            # Calculate priority based on distance to target (closer zones preferred)
+            distance_to_target = np.sqrt((zone_x - x_target)**2 + (zone_y - y_target)**2)
+            
+            zones.append({
+                'x': zone_x,
+                'y': zone_y,
+                'ha': ha,
+                'va': va,
+                'priority': distance_to_target
+            })
+    
+    # Sort zones by priority (closer to target first, but we'll use any available zone)
+    zones.sort(key=lambda z: z['priority'])
+    
+    def is_zone_available(zone):
+        x, y, ha, va = zone['x'], zone['y'], zone['ha'], zone['va']
+        
+        # Calculate actual text bounds
+        if ha == 'left':
+            text_x_min, text_x_max = x, x + text_width_data
+        elif ha == 'right':
+            text_x_min, text_x_max = x - text_width_data, x
+        else:  # center
+            text_x_min, text_x_max = x - text_width_data/2, x + text_width_data/2
+            
+        if va == 'bottom':
+            text_y_min, text_y_max = y, y + text_height_data
+        elif va == 'top':
+            text_y_min, text_y_max = y - text_height_data, y
+        else:  # center
+            text_y_min, text_y_max = y - text_height_data/2, y + text_height_data/2
+        
+        # Check boundaries
+        if (text_x_min < xlim[0] + x_margin or text_x_max > xlim[1] - x_margin or 
+            text_y_min < ylim[0] + y_margin or text_y_max > ylim[1] - y_margin):
+            return False
+        
+        # Check distance from existing labels - this is the critical part for no overlaps
+        for existing_x, existing_y in existing_labels:
+            distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
+            if distance < min_dist:
+                return False
+        
+        return True
+    
+    # Try zones in order until we find an available one
+    for zone in zones:
+        if is_zone_available(zone):
+            return (zone['x'], zone['y']), zone['ha'], zone['va']
+    
+    # If all zones are somehow occupied (very unlikely with 24 zones), 
+    # use a fallback position at the edge
+    fallback_x = xlim[1] - x_margin - text_width_data/2
+    fallback_y = ylim[1] - y_margin - text_height_data/2
+    return (fallback_x, fallback_y), 'right', 'top'
+
+
+def format_time_label(time_value):
+    """Format time values to remove unnecessary decimal places."""
+    if time_value == int(time_value):
+        return f"{int(time_value)}s"
+    else:
+        # Remove trailing zeros and unnecessary decimal places
+        return f"{time_value:.2f}s".rstrip('0').rstrip('.')
 
 def find_zero_crossings(times, values):
     """Find the times when values cross zero."""
@@ -66,7 +198,7 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     p_max = max([data['p_max'] for data in data_dict.values()])
     
     # Common settings
-    LABEL_SIZE = 14  # Increased by 20% from 12
+    LABEL_SIZE = 11.2  # Reduced by 20% from 14 to match main.py
     TITLE_SIZE = 17  # Increased by 20% from 14
     
     # Create colormap
@@ -110,6 +242,11 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         pressure_smooth = data['pressure_smooth']
         adotn_smooth_mm = data['adotn_smooth'] * 1000  # Convert to mm/s²
         
+        # Initialize label tracking for this subplot
+        ax1_labels = []
+        ax2_labels = []  
+        ax3_labels = []
+        
         # 1. Plot p vs v (smoothed)
         ax1 = fig.add_subplot(gs[i, 0])
         scatter1 = ax1.scatter(vdotn_smooth_mm, pressure_smooth, c=normalized_times, cmap=custom_cmap, norm=norm, s=20, alpha=0.8)
@@ -122,23 +259,39 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
             for v_cross in data['v_crossings']:
                 idx_at_cross = np.abs(normalized_times - v_cross).argmin()
                 p_at_cross = pressure_smooth[idx_at_cross]
-                ax1.axvline(x=0, ymin=0.45, ymax=0.55, color='red', linewidth=2)
-                ax1.annotate(f"{v_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(vdotn_smooth_mm, pressure_smooth))
+                time_label = format_time_label(v_cross)
+                xytext, ha, va = smart_label_position(ax1, (0, p_at_cross), time_label, 
+                                                    ax1_labels, data_points)
+                ax1_labels.append(xytext)
+                
+                ax1.annotate(time_label, 
                            xy=(0, p_at_cross), 
-                           xytext=(0.1*v_max, p_at_cross + 0.1*p_max),
-                           arrowprops=dict(arrowstyle="->", color='red'),
-                           color='red', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
             
             # Mark p=0 crossings
             for p_cross in data['p_crossings']:
                 idx_at_cross = np.abs(normalized_times - p_cross).argmin()
                 v_at_cross = vdotn_smooth_mm[idx_at_cross]
-                ax1.axhline(y=0, xmin=0.45, xmax=0.55, color='blue', linewidth=2)
-                ax1.annotate(f"{p_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(vdotn_smooth_mm, pressure_smooth))
+                time_label = format_time_label(p_cross)
+                xytext, ha, va = smart_label_position(ax1, (v_at_cross, 0), time_label, 
+                                                    ax1_labels, data_points)
+                ax1_labels.append(xytext)
+                
+                ax1.annotate(time_label, 
                            xy=(v_at_cross, 0), 
-                           xytext=(v_at_cross - 0.1*v_max, -0.1*p_max),
-                           arrowprops=dict(arrowstyle="->", color='blue'),
-                           color='blue', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
         
         ax1.set_xlim(-v_max, v_max)
         ax1.set_ylim(-p_max, p_max)
@@ -146,6 +299,10 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax1.grid(True, alpha=0.3)
+        # Format tick labels
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 2. Plot p vs a (smoothed)
         ax2 = fig.add_subplot(gs[i, 1])
@@ -159,23 +316,39 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
             for a_cross in data['a_crossings']:
                 idx_at_cross = np.abs(normalized_times - a_cross).argmin()
                 p_at_cross = pressure_smooth[idx_at_cross]
-                ax2.axvline(x=0, ymin=0.45, ymax=0.55, color='red', linewidth=2)
-                ax2.annotate(f"{a_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(adotn_smooth_mm, pressure_smooth))
+                time_label = format_time_label(a_cross)
+                xytext, ha, va = smart_label_position(ax2, (0, p_at_cross), time_label, 
+                                                    ax2_labels, data_points)
+                ax2_labels.append(xytext)
+                
+                ax2.annotate(time_label, 
                            xy=(0, p_at_cross), 
-                           xytext=(0.1*a_max, p_at_cross + 0.1*p_max),
-                           arrowprops=dict(arrowstyle="->", color='red'),
-                           color='red', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
             
             # Mark p=0 crossings
             for p_cross in data['p_crossings']:
                 idx_at_cross = np.abs(normalized_times - p_cross).argmin()
                 a_at_cross = adotn_smooth_mm[idx_at_cross]
-                ax2.axhline(y=0, xmin=0.45, xmax=0.55, color='blue', linewidth=2)
-                ax2.annotate(f"{p_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(adotn_smooth_mm, pressure_smooth))
+                time_label = format_time_label(p_cross)
+                xytext, ha, va = smart_label_position(ax2, (a_at_cross, 0), time_label, 
+                                                    ax2_labels, data_points)
+                ax2_labels.append(xytext)
+                
+                ax2.annotate(time_label, 
                            xy=(a_at_cross, 0), 
-                           xytext=(a_at_cross - 0.1*a_max, -0.1*p_max),
-                           arrowprops=dict(arrowstyle="->", color='blue'),
-                           color='blue', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
         
         ax2.set_xlim(-a_max, a_max)
         ax2.set_ylim(-p_max, p_max)
@@ -183,6 +356,10 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax2.grid(True, alpha=0.3)
+        # Format tick labels
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
         
         # 3. Plot v vs a (smoothed)
         ax3 = fig.add_subplot(gs[i, 2])
@@ -196,23 +373,39 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
             for v_cross in data['v_crossings']:
                 idx_at_cross = np.abs(normalized_times - v_cross).argmin()
                 a_at_cross = adotn_smooth_mm[idx_at_cross]
-                ax3.axhline(y=0, xmin=0.45, xmax=0.55, color='green', linewidth=2)
-                ax3.annotate(f"{v_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(adotn_smooth_mm, vdotn_smooth_mm))
+                time_label = format_time_label(v_cross)
+                xytext, ha, va = smart_label_position(ax3, (a_at_cross, 0), time_label, 
+                                                    ax3_labels, data_points)
+                ax3_labels.append(xytext)
+                
+                ax3.annotate(time_label, 
                            xy=(a_at_cross, 0), 
-                           xytext=(a_at_cross + 0.1*a_max, 0.1*v_max),
-                           arrowprops=dict(arrowstyle="->", color='green'),
-                           color='green', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='green', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
             
             # Mark a=0 crossings
             for a_cross in data['a_crossings']:
                 idx_at_cross = np.abs(normalized_times - a_cross).argmin()
                 v_at_cross = vdotn_smooth_mm[idx_at_cross]
-                ax3.axvline(x=0, ymin=0.45, ymax=0.55, color='purple', linewidth=2)
-                ax3.annotate(f"{a_cross:.2f}s", 
+                
+                # Use smart positioning
+                data_points = list(zip(adotn_smooth_mm, vdotn_smooth_mm))
+                time_label = format_time_label(a_cross)
+                xytext, ha, va = smart_label_position(ax3, (0, v_at_cross), time_label, 
+                                                    ax3_labels, data_points)
+                ax3_labels.append(xytext)
+                
+                ax3.annotate(time_label, 
                            xy=(0, v_at_cross), 
-                           xytext=(-0.1*a_max, v_at_cross - 0.1*v_max),
-                           arrowprops=dict(arrowstyle="->", color='purple'),
-                           color='purple', fontsize=10)
+                           xytext=xytext,
+                           arrowprops=dict(arrowstyle="->", color='purple', lw=1.5),
+                           color='black', fontsize=11, fontweight='bold',
+                           ha=ha, va=va)
         
         ax3.set_xlim(-a_max, a_max)
         ax3.set_ylim(-v_max, v_max)
@@ -220,6 +413,10 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
         ax3.grid(True, alpha=0.3)
+        # Format tick labels
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
     
     # Add a colorbar for time
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])
@@ -409,6 +606,12 @@ def create_cfd_analysis_3x3_panel(dfs, patch_dfs, subject_name, pdf, pdfs_dir=No
                 page_title = f"Patch Mean Data ({radius_key})"
                 create_single_3x3_page(patch_data, subject_name, page_title, pdf, with_markers=False)
     
+    # Add Point-Patch Comparison Page
+    if dfs and patch_dfs:
+        print("Creating Point-Patch Comparison Page")
+        single_point_data = process_data_for_page(dfs, is_patch=False)
+        create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir)
+    
     # Save standalone PDF
     if pdfs_dir:
         print(f"Saved to: {pdfs_dir / f'{subject_name}_cfd_analysis_3x3.pdf'}")
@@ -449,11 +652,193 @@ def create_cfd_analysis_3x3_panel_with_markers(dfs, patch_dfs, subject_name, pdf
                 page_title = f"Patch Mean Data ({radius_key})"
                 create_single_3x3_page(patch_data, subject_name, page_title, pdf, with_markers=True)
     
+    # Add Point-Patch Comparison Page
+    if dfs and patch_dfs:
+        print("Creating Point-Patch Comparison Page")
+        single_point_data = process_data_for_page(dfs, is_patch=False)
+        create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir)
+    
     # Save standalone PDF
     if pdfs_dir:
         print(f"Saved to: {pdfs_dir / f'{subject_name}_cfd_analysis_3x3_with_markers.pdf'}")
     else:
         print(f"Saved to: {subject_name}_cfd_analysis_3x3_with_markers.pdf")
+
+
+def create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir=None, default_radius="2.0mm"):
+    """
+    Create a dedicated 3x3 comparison page showing single point data vs patch data overlays.
+    
+    3 rows (anatomical locations) × 3 columns (p vs v, p vs a, v vs a comparisons)
+    
+    Args:
+        single_point_data: Processed single point data dictionary
+        patch_dfs: Patch data dictionary
+        subject_name: Subject name
+        pdf: PDF object to save to
+        pdfs_dir: Directory for standalone PDFs
+        default_radius: Which patch radius to use for comparison (default: 2.0mm)
+    """
+    print(f"\nCreating Point-Patch Comparison Page (3x3 layout)...")
+    
+    # Create figure with 3x3 layout
+    fig = plt.figure(figsize=(20, 20))
+    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+    
+    # Define the locations
+    locations = [
+        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
+        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
+        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
+    ]
+    
+    # Get patch data for the specified radius
+    patch_data_for_comparison = {}
+    if patch_dfs:
+        patch_data_for_comparison = process_data_for_page(patch_dfs, is_patch=True, radius_key=default_radius)
+    
+    if not patch_data_for_comparison:
+        print(f"Warning: No patch data found for radius {default_radius}, skipping comparison page")
+        return
+    
+    # Find mutual ranges across all locations (using both single point and patch data)
+    v_max = 0
+    a_max = 0 
+    p_max = 0
+    
+    # Get ranges from single point data
+    if single_point_data:
+        for data in single_point_data.values():
+            v_max = max(v_max, data['v_max'])
+            a_max = max(a_max, data['a_max'])
+            p_max = max(p_max, data['p_max'])
+    
+    # Get ranges from patch data
+    for data in patch_data_for_comparison.values():
+        v_max = max(v_max, data['v_max'])
+        a_max = max(a_max, data['a_max'])
+        p_max = max(p_max, data['p_max'])
+    
+    # Add margins
+    v_max *= 1.05
+    a_max *= 1.05
+    p_max *= 1.05
+    
+    # Common settings
+    LABEL_SIZE = 11.2
+    TITLE_SIZE = 17
+    
+    # Create the 3x3 grid of comparison plots
+    for i, loc in enumerate(locations):
+        location_key = loc['key']
+        
+        # Get single point data for this location
+        sp_data = single_point_data.get(location_key) if single_point_data else None
+        patch_data = patch_data_for_comparison.get(location_key)
+        
+        if not patch_data:
+            continue
+            
+        # Get patch data
+        patch_vdotn_mm = patch_data['vdotn_smooth'] * 1000  # Convert to mm/s
+        patch_pressure = patch_data['pressure_smooth']
+        patch_adotn_mm = patch_data['adotn_smooth'] * 1000  # Convert to mm/s²
+        
+        # Get single point data if available
+        if sp_data:
+            sp_vdotn_mm = sp_data['vdotn_smooth'] * 1000
+            sp_pressure = sp_data['pressure_smooth']
+            sp_adotn_mm = sp_data['adotn_smooth'] * 1000
+        
+        # 1. Plot p vs v comparison
+        ax1 = fig.add_subplot(gs[i, 0])
+        ax1.axvline(x=0, color='k', linestyle='--', alpha=0.5)
+        ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        
+        # Plot patch data as line (in time order)
+        ax1.plot(patch_vdotn_mm, patch_pressure, 
+                'c-', linewidth=2, alpha=0.8, label='Patch Average (2mm radius)')
+        
+        # Plot single point data as line (in time order)
+        if sp_data:
+            ax1.plot(sp_vdotn_mm, sp_pressure, 
+                    'k-', linewidth=2, alpha=0.8, label='Single Point', zorder=5)
+        
+        ax1.set_xlim(-v_max, v_max)
+        ax1.set_ylim(-p_max, p_max)
+        ax1.set_xlabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax1.set_title(f'Pressure vs Velocity\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(fontsize=LABEL_SIZE*0.8, loc='upper right')
+        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontweight('bold')
+        
+        # 2. Plot p vs a comparison
+        ax2 = fig.add_subplot(gs[i, 1])
+        ax2.axvline(x=0, color='k', linestyle='--', alpha=0.5)
+        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        
+        # Plot patch data as line (in time order)
+        ax2.plot(patch_adotn_mm, patch_pressure, 
+                'c-', linewidth=2, alpha=0.8, label='Patch Average (2mm radius)')
+        
+        # Plot single point data as line (in time order)
+        if sp_data:
+            ax2.plot(sp_adotn_mm, sp_pressure, 
+                    'k-', linewidth=2, alpha=0.8, label='Single Point', zorder=5)
+        
+        ax2.set_xlim(-a_max, a_max)
+        ax2.set_ylim(-p_max, p_max)
+        ax2.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax2.set_title(f'Pressure vs Acceleration\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(fontsize=LABEL_SIZE*0.8, loc='upper right')
+        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
+            label.set_fontweight('bold')
+        
+        # 3. Plot v vs a comparison
+        ax3 = fig.add_subplot(gs[i, 2])
+        ax3.axvline(x=0, color='k', linestyle='--', alpha=0.5)
+        ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+        
+        # Plot patch data as line (in time order)
+        ax3.plot(patch_adotn_mm, patch_vdotn_mm, 
+                'c-', linewidth=2, alpha=0.8, label='Patch Average (2mm radius)')
+        
+        # Plot single point data as line (in time order)
+        if sp_data:
+            ax3.plot(sp_adotn_mm, sp_vdotn_mm, 
+                    'k-', linewidth=2, alpha=0.8, label='Single Point', zorder=5)
+        
+        ax3.set_xlim(-a_max, a_max)
+        ax3.set_ylim(-v_max, v_max)
+        ax3.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
+        ax3.set_title(f'Velocity vs Acceleration\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
+        ax3.grid(True, alpha=0.3)
+        ax3.legend(fontsize=LABEL_SIZE*0.8, loc='upper right')
+        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
+        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
+            label.set_fontweight('bold')
+    
+    # Add overall title
+    fig.suptitle(f'Point vs Patch Comparison Analysis\nSingle Point (Black Lines) vs Patch Average {default_radius} (Cyan Lines)', 
+                 fontsize=16, fontweight='bold', y=0.98)
+    
+    # Add note
+    fig.text(0.5, 0.01, f'Comparison between single point measurements (black lines) and patch-averaged data (cyan lines, {default_radius} radius)', 
+            fontsize=10, ha='center', va='bottom')
+    
+    # Adjust layout and save
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    pdf.savefig(fig, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Point-Patch Comparison Page completed.")
 
 
 def load_cfd_data_for_analysis(subject_name: str, output_dir: Path, enable_patch_analysis: bool = True, patch_radii: List[float] = None) -> tuple:
