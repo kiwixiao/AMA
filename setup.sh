@@ -76,10 +76,48 @@ fi
 # Test installation
 echo ""
 echo "🧪 Testing installation..."
-if python src/main.py --listsubjects &> /dev/null; then
-    echo "✅ Installation test passed!"
+
+# Activate environment for testing
+if [ "$USE_CONDA" = true ]; then
+    eval "$(conda shell.bash hook)"
+    conda activate cfd-analysis
+fi
+
+# Test core imports
+python -c "
+import sys
+modules = [
+    ('numpy', 'NumPy'),
+    ('pandas', 'Pandas'),
+    ('scipy', 'SciPy'),
+    ('matplotlib', 'Matplotlib'),
+    ('plotly', 'Plotly'),
+    ('h5py', 'HDF5'),
+    ('sklearn', 'scikit-learn'),
+    ('pyvista', 'PyVista'),
+]
+all_ok = True
+for module, name in modules:
+    try:
+        __import__(module)
+        print(f'  ✓ {name}')
+    except ImportError:
+        print(f'  ✗ {name}')
+        all_ok = False
+sys.exit(0 if all_ok else 1)
+"
+
+if [ $? -eq 0 ]; then
+    echo "✅ All core dependencies installed!"
 else
-    echo "⚠️  Installation test failed - some dependencies may be missing"
+    echo "⚠️  Some dependencies failed to import"
+fi
+
+# Test pipeline
+if python src/main.py --listsubjects &> /dev/null; then
+    echo "✅ Pipeline test passed!"
+else
+    echo "⚠️  Pipeline test failed - check error messages above"
 fi
 
 echo ""
