@@ -22,23 +22,18 @@ if [ "$USE_CONDA" = true ]; then
     echo "📦 Setting up conda environment..."
     
     # Check if environment already exists
-    if conda env list | grep -q "cfd-analysis"; then
-        echo "⚠️  Environment 'cfd-analysis' already exists"
-        read -p "Do you want to remove and recreate it? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            conda env remove -n cfd-analysis
-        else
-            echo "❌ Setup cancelled"
-            exit 1
-        fi
+    if conda env list | grep -q "^cfd-analysis "; then
+        echo "✅ Environment 'cfd-analysis' already exists - skipping creation"
+        echo ""
+        echo "   To update dependencies, run:"
+        echo "   conda env update -f environment.yml --prune"
+        echo ""
+    else
+        # Create environment
+        echo "🔧 Creating conda environment..."
+        conda env create -f environment.yml
+        echo "✅ Conda environment created successfully!"
     fi
-    
-    # Create environment
-    echo "🔧 Creating conda environment..."
-    conda env create -f environment.yml
-    
-    echo "✅ Conda environment created successfully!"
     echo ""
     echo "To activate the environment, run:"
     echo "  conda activate cfd-analysis"
