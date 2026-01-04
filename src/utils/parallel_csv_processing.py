@@ -2058,103 +2058,111 @@ def calculate_surface_normal_hdf5(points: np.ndarray, center_idx: int, k: int = 
     """
     Calculate surface normal at a point using local neighborhood PCA.
     HDF5-compatible version of the spatial analysis function.
-    
+
     Args:
         points: Array of 3D points (N, 3)
         center_idx: Index of the point to calculate normal for
         k: Number of nearest neighbors to use for normal calculation
-    
+
     Returns:
         Unit normal vector (3,)
     """
     if len(points) < 3:
         return np.array([0, 0, 1])  # Default normal if insufficient points
-    
-    # Find k nearest neighbors
-    from sklearn.neighbors import NearestNeighbors
-    nbrs = NearestNeighbors(n_neighbors=min(k, len(points))).fit(points)
-    distances, indices = nbrs.kneighbors([points[center_idx]])
-    
-    # Get local neighborhood points
-    local_points = points[indices[0]]
-    
-    # Center the points
-    centered = local_points - local_points.mean(axis=0)
-    
-    # Compute PCA to find the normal (smallest eigenvector)
+
     try:
+        # Find k nearest neighbors
+        # Note: sklearn may fail on macOS with conda due to threadpoolctl issues
+        from sklearn.neighbors import NearestNeighbors
+        nbrs = NearestNeighbors(n_neighbors=min(k, len(points))).fit(points)
+        distances, indices = nbrs.kneighbors([points[center_idx]])
+
+        # Get local neighborhood points
+        local_points = points[indices[0]]
+
+        # Center the points
+        centered = local_points - local_points.mean(axis=0)
+
+        # Compute PCA to find the normal (smallest eigenvector)
         _, _, vh = np.linalg.svd(centered)
         normal = vh[-1]  # Last row is the normal direction
         return normal / np.linalg.norm(normal)
-    except:
-        return np.array([0, 0, 1])  # Default normal if SVD fails
+    except Exception:
+        # Return default normal if sklearn or SVD fails (e.g., macOS threadpoolctl issue)
+        return np.array([0, 0, 1])
 
 
-def find_connected_points_with_normal_filter_hdf5(df: pd.DataFrame, center_point: Tuple[float, float, float], 
+def find_connected_points_with_normal_filter_hdf5(df: pd.DataFrame, center_point: Tuple[float, float, float],
                                                   radius: float, connectivity_threshold: float = 0.001,
                                                   normal_angle_threshold: float = 60.0) -> pd.DataFrame:
     """
     Find connected points within radius that also satisfy surface normal constraints.
     HDF5-compatible version that works with DataFrame created from HDF5 arrays.
-    
+
     Args:
         df: DataFrame with airway surface points (from HDF5 data)
         center_point: (x, y, z) coordinates of center
         radius: Maximum distance from center
         connectivity_threshold: Maximum distance between connected points
         normal_angle_threshold: Maximum angle difference from reference normal (degrees)
-    
+
     Returns:
         DataFrame with filtered connected points
     """
     import numpy as np
-    from sklearn.cluster import DBSCAN
     from scipy.spatial.distance import cdist
-    
-    # First, get connected points using original method
+
+    # First, get all points within radius
     distances = np.sqrt(
-        (df['X (m)'] - center_point[0])**2 + 
-        (df['Y (m)'] - center_point[1])**2 + 
+        (df['X (m)'] - center_point[0])**2 +
+        (df['Y (m)'] - center_point[1])**2 +
         (df['Z (m)'] - center_point[2])**2
     )
-    
+
     within_radius_mask = distances <= radius
     candidate_points = df[within_radius_mask].copy()
-    
+
     if len(candidate_points) <= 1:
         if len(candidate_points) == 1:
             candidate_points['distance_from_center'] = distances[within_radius_mask]
         return candidate_points
-    
+
     # Extract coordinates for clustering
     coords = candidate_points[['X (m)', 'Y (m)', 'Z (m)']].values
-    
-    # Use DBSCAN to find connected components
-    clustering = DBSCAN(eps=connectivity_threshold, min_samples=1).fit(coords)
-    candidate_points['cluster_label'] = clustering.labels_
-    
-    # Find which cluster contains the center point
-    center_distances = cdist([center_point], coords)[0]
-    center_point_idx = np.argmin(center_distances)
-    center_cluster = candidate_points.iloc[center_point_idx]['cluster_label']
-    
-    # Keep only points in the same cluster as the center point
-    connected_points = candidate_points[candidate_points['cluster_label'] == center_cluster].copy()
-    
+
+    # Try DBSCAN clustering - may fail on macOS with conda due to sklearn threadpoolctl issues
+    try:
+        from sklearn.cluster import DBSCAN
+        clustering = DBSCAN(eps=connectivity_threshold, min_samples=1).fit(coords)
+        candidate_points['cluster_label'] = clustering.labels_
+
+        # Find which cluster contains the center point
+        center_distances = cdist([center_point], coords)[0]
+        center_point_idx = np.argmin(center_distances)
+        center_cluster = candidate_points.iloc[center_point_idx]['cluster_label']
+
+        # Keep only points in the same cluster as the center point
+        connected_points = candidate_points[candidate_points['cluster_label'] == center_cluster].copy()
+    except Exception as e:
+        # sklearn failed (macOS threadpoolctl issue) - skip clustering, use all points in radius
+        print(f"   ⚠️  sklearn clustering failed ({type(e).__name__}), using distance-only filtering")
+        connected_points = candidate_points.copy()
+        connected_points['cluster_label'] = 0  # Dummy label
+
     # Now apply surface normal filtering
     if len(connected_points) > 3 and radius >= 0.001:  # Only apply normal filtering for patches >= 1mm
         coords_connected = connected_points[['X (m)', 'Y (m)', 'Z (m)']].values
-        
+
         # Find the reference normal using 1mm radius around center point
         ref_radius = min(0.001, radius)  # Use 1mm or smaller if radius is smaller
         ref_distances = np.sqrt(np.sum((coords_connected - np.array(center_point))**2, axis=1))
         ref_mask = ref_distances <= ref_radius
-        
+
         if np.sum(ref_mask) >= 3:  # Need at least 3 points for normal calculation
             ref_points = coords_connected[ref_mask]
             ref_center_idx = np.argmin(ref_distances[ref_mask])
             reference_normal = calculate_surface_normal_hdf5(ref_points, ref_center_idx)
-            
+
             # Calculate normals for all connected points and filter by angle
             valid_indices = []
             for i, point_coords in enumerate(coords_connected):
@@ -2163,40 +2171,46 @@ def find_connected_points_with_normal_filter_hdf5(df: pd.DataFrame, center_point
                 else:
                     # Calculate normal at this point
                     point_normal = calculate_surface_normal_hdf5(coords_connected, i, k=8)
-                    
+
                     # Calculate angle between normals
                     cos_angle = np.dot(reference_normal, point_normal)
                     cos_angle = np.clip(cos_angle, -1.0, 1.0)  # Ensure valid range
                     angle_deg = np.degrees(np.arccos(np.abs(cos_angle)))  # Use absolute value for undirected normals
-                    
+
                     if angle_deg <= normal_angle_threshold:
                         valid_indices.append(i)
-            
+
             # Filter points based on normal constraints
             if valid_indices:
                 connected_points = connected_points.iloc[valid_indices].copy()
-                
+
                 # Final connectivity check: Normal filtering might create disconnected components
                 # Keep only the component that contains the original center point
                 if len(connected_points) > 1:
-                    coords_filtered = connected_points[['X (m)', 'Y (m)', 'Z (m)']].values
-                    
-                    # Re-cluster the normal-filtered points to find disconnected components
-                    final_clustering = DBSCAN(eps=connectivity_threshold, min_samples=1).fit(coords_filtered)
-                    connected_points['final_cluster_label'] = final_clustering.labels_
-                    
-                    # Find which cluster contains the center point
-                    final_center_distances = cdist([center_point], coords_filtered)[0]
-                    final_center_point_idx = np.argmin(final_center_distances)
-                    final_center_cluster = connected_points.iloc[final_center_point_idx]['final_cluster_label']
-                    
-                    # Keep only points in the same final cluster as the center point
-                    connected_points = connected_points[connected_points['final_cluster_label'] == final_center_cluster].copy()
-                    connected_points = connected_points.drop('final_cluster_label', axis=1)
-    
+                    try:
+                        from sklearn.cluster import DBSCAN
+                        coords_filtered = connected_points[['X (m)', 'Y (m)', 'Z (m)']].values
+
+                        # Re-cluster the normal-filtered points to find disconnected components
+                        final_clustering = DBSCAN(eps=connectivity_threshold, min_samples=1).fit(coords_filtered)
+                        connected_points['final_cluster_label'] = final_clustering.labels_
+
+                        # Find which cluster contains the center point
+                        final_center_distances = cdist([center_point], coords_filtered)[0]
+                        final_center_point_idx = np.argmin(final_center_distances)
+                        final_center_cluster = connected_points.iloc[final_center_point_idx]['final_cluster_label']
+
+                        # Keep only points in the same final cluster as the center point
+                        connected_points = connected_points[connected_points['final_cluster_label'] == final_center_cluster].copy()
+                        connected_points = connected_points.drop('final_cluster_label', axis=1)
+                    except Exception:
+                        # sklearn failed again - skip final clustering
+                        pass
+
     connected_points['distance_from_center'] = distances[within_radius_mask][connected_points.index]
-    connected_points = connected_points.drop('cluster_label', axis=1)
-    
+    if 'cluster_label' in connected_points.columns:
+        connected_points = connected_points.drop('cluster_label', axis=1)
+
     return connected_points
 
 

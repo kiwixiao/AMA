@@ -231,35 +231,36 @@ def format_time_label(time_value):
 def calculate_surface_normal(points: np.ndarray, center_idx: int, k: int = 10) -> np.ndarray:
     """
     Calculate surface normal at a point using local neighborhood PCA.
-    
+
     Args:
         points: Array of 3D points (N, 3)
         center_idx: Index of the point to calculate normal for
         k: Number of nearest neighbors to use for normal calculation
-    
+
     Returns:
         Unit normal vector (3,)
     """
     if len(points) < 3:
         return np.array([0, 0, 1])  # Default normal if insufficient points
-    
-    # Find k nearest neighbors
-    nbrs = NearestNeighbors(n_neighbors=min(k, len(points))).fit(points)
-    distances, indices = nbrs.kneighbors([points[center_idx]])
-    
-    # Get local neighborhood points
-    local_points = points[indices[0]]
-    
-    # Center the points
-    centered = local_points - local_points.mean(axis=0)
-    
-    # Compute PCA to find the normal (smallest eigenvector)
+
     try:
+        # Find k nearest neighbors
+        nbrs = NearestNeighbors(n_neighbors=min(k, len(points))).fit(points)
+        distances, indices = nbrs.kneighbors([points[center_idx]])
+
+        # Get local neighborhood points
+        local_points = points[indices[0]]
+
+        # Center the points
+        centered = local_points - local_points.mean(axis=0)
+
+        # Compute PCA to find the normal (smallest eigenvector)
         _, _, vh = np.linalg.svd(centered)
         normal = vh[-1]  # Last row is the normal direction
         return normal / np.linalg.norm(normal)
-    except:
-        return np.array([0, 0, 1])  # Default normal if SVD fails
+    except Exception:
+        # Handle sklearn/threadpoolctl errors or SVD failures
+        return np.array([0, 0, 1])  # Default normal
 
 def find_connected_points_with_normal_filter(df: pd.DataFrame, center_point: Tuple[float, float, float], 
                                            radius: float, connectivity_threshold: float = 0.001,
@@ -814,8 +815,18 @@ def calculate_derived_quantities(trajectory_data):
     
     return signed_velocities, accelerations, vdotn, pressures
 
-def save_trajectory_data(trajectory_data, subject_name, patch_number, face_index, description, is_region=False):
-    """Save trajectory data to CSV file in a dedicated folder."""
+def save_trajectory_data(trajectory_data, subject_name, patch_number, face_index, description, is_region=False, time_offset_ms: float = 0.0):
+    """Save trajectory data to CSV file in a dedicated folder.
+
+    Args:
+        trajectory_data: List of trajectory data points
+        subject_name: Name of the subject
+        patch_number: Patch number
+        face_index: Face index
+        description: Description of the tracking location
+        is_region: Whether this is region-based tracking
+        time_offset_ms: Time offset in milliseconds for normalization (breathing cycle start)
+    """
     # Create tracked_points directory if it doesn't exist
     results_dir = Path(f'{subject_name}_results')
     output_dir = results_dir / 'tracked_points'
@@ -847,9 +858,15 @@ def save_trajectory_data(trajectory_data, subject_name, patch_number, face_index
     if len(trajectory_data) != len(unique_trajectory_data):
         print(f"Removed {len(trajectory_data) - len(unique_trajectory_data)} duplicate time points")
     
+    # Calculate normalized time (shifted to start from 0)
+    time_offset_s = time_offset_ms / 1000.0  # Convert ms to seconds
+    time_values = [p['time'] for p in unique_trajectory_data]
+    time_normalized = [t - time_offset_s for t in time_values]
+
     df = pd.DataFrame({
         'Time Point': [p['time_point'] for p in unique_trajectory_data],
-        'Time (s)': [p['time'] for p in unique_trajectory_data],
+        'Time (s)': time_values,
+        'Time_normalized (s)': time_normalized,
         'X (m)': [p['x'] for p in unique_trajectory_data],
         'Y (m)': [p['y'] for p in unique_trajectory_data],
         'Z (m)': [p['z'] for p in unique_trajectory_data],
@@ -949,6 +966,9 @@ def compute_combination_mean(subject_name, combination_config, tracking_location
         'Time Point': dataframes[0]['Time Point'].values,
         'Time (s)': dataframes[0]['Time (s)'].values,
     }
+    # Add Time_normalized if available in source data
+    if 'Time_normalized (s)' in dataframes[0].columns:
+        mean_data['Time_normalized (s)'] = dataframes[0]['Time_normalized (s)'].values
     
     # Columns to average
     columns_to_average = [
@@ -1634,14 +1654,32 @@ def create_dpdt_vs_dadt_plot(df, subject_name, description, patch_number, face_i
     pdf.savefig(fig, bbox_inches='tight')
     plt.close()
 
-def create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, pdf):
-    """Create a plot showing various metrics over time."""
+def create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, pdf, use_normalized_time: bool = False, flow_profile_path: str = None):
+    """Create a plot showing various metrics over time.
+
+    Args:
+        df: DataFrame with tracking data
+        subject_name: Name of the subject
+        description: Description of the tracking location
+        patch_number: Patch number
+        face_index: Face index
+        pdf: PDF object to save the plot to
+        use_normalized_time: If True, use Time_normalized (s) column (starts from 0)
+        flow_profile_path: Optional explicit path to flow profile CSV
+    """
     # Common settings
     LABEL_SIZE = 13.44  # Reduced by 20% from 16.8
     TITLE_SIZE = 17  # Increased by 20% from 14
-    
-    # Get data
-    times = df['Time (s)'].values
+
+    # Get data - use normalized time if requested and available
+    if use_normalized_time and 'Time_normalized (s)' in df.columns:
+        times = df['Time_normalized (s)'].values
+        time_label = 'Time (s) - Normalized'
+        time_suffix = '_normalized'
+    else:
+        times = df['Time (s)'].values
+        time_label = 'Time (s)'
+        time_suffix = ''
     vdotn = df['VdotN'].values
     pressure = df['Total Pressure (Pa)'].values
     velocity = df['Velocity: Magnitude (m/s)'].values
@@ -1738,8 +1776,11 @@ def create_metrics_vs_time_plot(df, subject_name, description, patch_number, fac
     gs = fig.add_gridspec(5, 1, height_ratios=[1, 1, 1, 1, 1], hspace=0.3)
     
     # Get inhale-exhale transition from flow profile
-    base_subject = extract_base_subject(subject_name)
-    flow_profile = pd.read_csv(f'{base_subject}FlowProfile.csv')
+    if flow_profile_path is not None:
+        flow_profile = pd.read_csv(flow_profile_path)
+    else:
+        base_subject = extract_base_subject(subject_name)
+        flow_profile = pd.read_csv(f'{base_subject}FlowProfile.csv')
     
     # Apply smoothing in memory
     def apply_smoothing(data, window_size=20):
@@ -1842,8 +1883,9 @@ def create_metrics_vs_time_plot(df, subject_name, description, patch_number, fac
         ax5.plot(flow_times, flow_rates, 'm-', linewidth=2, label='Mass Flow Rate')
     
     ax5.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    ax5.axvline(x=inhale_exhale_transition, color='k', linestyle=':', alpha=0.7, label=inhale_exhale_label)
-    ax5.set_xlabel('Time (s)', fontsize=LABEL_SIZE, fontweight='bold')
+    if inhale_exhale_transition is not None:
+        ax5.axvline(x=inhale_exhale_transition, color='k', linestyle=':', alpha=0.7, label=inhale_exhale_label)
+    ax5.set_xlabel(time_label, fontsize=LABEL_SIZE, fontweight='bold')
     ax5.set_ylabel('Flow Rate (kg/s)', fontsize=LABEL_SIZE, fontweight='bold')
     ax5.set_title('Mass Flow Rate', fontsize=TITLE_SIZE, fontweight='bold', pad=10)
     ax5.grid(True, alpha=0.3)
@@ -1868,34 +1910,35 @@ def create_metrics_vs_time_plot(df, subject_name, description, patch_number, fac
     results_dir = Path(f'{subject_name}_results')
     figures_dir = results_dir / 'figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
-    png_filename = figures_dir / f"{subject_name}_metrics_vs_time_{description.lower().replace(' ', '_')}_patch{patch_number}_face{face_index}.png"
+    png_filename = figures_dir / f"{subject_name}_metrics_vs_time_{description.lower().replace(' ', '_')}_patch{patch_number}_face{face_index}{time_suffix}.png"
     plt.savefig(png_filename, dpi=300, bbox_inches='tight')
     
     plt.close()
 
-def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None):
+def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
     """
-    Create a symmetric 3x3 panel comparison of pressure, velocity, and acceleration across three anatomical points.
+    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
     This version does not include zero-crossing markers.
-    
+
     Arguments:
         dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
         subject_name: Name of the subject
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
+        pdfs_dir: Directory for PDF output
+        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
     """
-    print(f"\nGenerating clean symmetric comparison panel (without markers)...")
-    
-    # Create figure with 3x3 layout
-    fig = plt.figure(figsize=(20, 20))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-    
-    # Define the locations and their descriptions - these should match the keys in dfs
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
+    if locations is None or len(locations) == 0:
+        print("Warning: No locations provided for comparison panel")
+        return
+
+    print(f"\nGenerating clean symmetric comparison panel (without markers) for {len(locations)} locations...")
+
+    # Calculate grid dimensions based on number of locations
+    n_locations = len(locations)
+    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
+    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
+    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
     
     # Find mutual ranges for each variable across all points
     v_max = 0
@@ -2079,28 +2122,29 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
     
     plt.close()
 
-def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
+def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
     """
-    Create a symmetric 3x3 panel comparison of pressure, velocity, and acceleration across three anatomical points.
+    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
-    
+
     Arguments:
         dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
         subject_name: Name of the subject
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
+        pdfs_dir: Directory for PDF output
+        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
     """
-    print(f"\nGenerating symmetric comparison panel...")
-    
-    # Create figure with 3x3 layout
-    fig = plt.figure(figsize=(20, 20))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-    
-    # Define the locations and their descriptions - these should match the keys in dfs
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
+    if locations is None or len(locations) == 0:
+        print("Warning: No locations provided for comparison panel")
+        return
+
+    print(f"\nGenerating symmetric comparison panel for {len(locations)} locations...")
+
+    # Calculate grid dimensions based on number of locations
+    n_locations = len(locations)
+    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
+    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
+    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
     
     # Find mutual ranges for each variable across all points
     v_max = 0
@@ -2356,33 +2400,34 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None):
     
     plt.close()
 
-def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None):
+def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
     """
-    Create a symmetric 3x3 panel comparison of pressure, velocity, and acceleration across three anatomical points.
+    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
     This version applies smoothing to the data.
-    
+
     Arguments:
         dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
         subject_name: Name of the subject
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
+        pdfs_dir: Directory for PDF output
+        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
     """
-    print(f"\nGenerating smoothed symmetric comparison panel...")
-    
-    # Create figure with 3x3 layout
-    fig = plt.figure(figsize=(20, 20))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-    
+    if locations is None or len(locations) == 0:
+        print("Warning: No locations provided for comparison panel")
+        return
+
+    print(f"\nGenerating smoothed symmetric comparison panel for {len(locations)} locations...")
+
+    # Calculate grid dimensions based on number of locations
+    n_locations = len(locations)
+    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
+    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
+    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
+
     # Define moving average function for smoothing
     def moving_average(data, window_size=20):
         return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
-    
-    # Define the locations and their descriptions - these should match the keys in dfs
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
     
     # Find mutual ranges for each variable across all points
     v_max = 0
@@ -2620,51 +2665,61 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
     
     plt.close()
 
-def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir=None):
+def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir=None, locations=None, use_original_time=False):
     """
-    Create a symmetric 3x3 panel comparison of pressure, velocity, and acceleration across three anatomical points.
+    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     This version applies a moving average smoothing filter with window size 20 to all data,
     and also adds markers and text labels for zero crossings.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
-    
+
     Arguments:
         dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
         subject_name: Name of the subject
         pdf: PDF object to save the plot to
+        pdfs_dir: Directory for PDF output
+        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
+        use_original_time: If True, use original timestamps; if False, normalize to start from 0
     """
-    print(f"\nGenerating smoothed symmetric comparison panel with zero-crossing markers...")
-    
-    # Create figure with 3x3 layout
-    fig = plt.figure(figsize=(20, 20))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-    
-    # Define the locations and their descriptions - these should match the keys in dfs
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
-    
+    if locations is None or len(locations) == 0:
+        print("Warning: No locations provided for comparison panel")
+        return
+
+    time_mode = "original" if use_original_time else "normalized"
+    print(f"\nGenerating smoothed symmetric comparison panel with zero-crossing markers for {len(locations)} locations ({time_mode} time)...")
+
+    # Calculate grid dimensions based on number of locations
+    n_locations = len(locations)
+    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
+    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
+    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
+
     # Find mutual ranges for each variable across all points
     v_max = 0
     a_max = 0
     p_max = 0
-    
+
     # Find the global minimum time to renormalize time to start from 0
     global_time_min = float('inf')
     for loc in locations:
         df = dfs[loc['key']]
         times = df['Time (s)'].values
         global_time_min = min(global_time_min, times.min())
-    
+
+    # Time offset for normalization (0 if using original time)
+    time_offset = 0 if use_original_time else global_time_min
+
     # The original inhale-exhale transition time
     original_inhale_exhale = 1.034  # This is the value from the command output
-    
-    # Calculate the normalized inhale-exhale transition time
-    normalized_inhale_exhale = original_inhale_exhale - global_time_min
-    
-    print(f"Renormalizing time for smoothed plot with markers: Original range started at {global_time_min:.3f}s")
-    print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {normalized_inhale_exhale:.3f}s")
+
+    # Calculate the display inhale-exhale transition time
+    display_inhale_exhale = original_inhale_exhale if use_original_time else (original_inhale_exhale - global_time_min)
+
+    if use_original_time:
+        print(f"Using original timestamps: Range starts at {global_time_min:.3f}s")
+        print(f"Inhale-exhale transition at {original_inhale_exhale:.3f}s")
+    else:
+        print(f"Normalizing time: Original range started at {global_time_min:.3f}s")
+        print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {display_inhale_exhale:.3f}s")
     
     # Define the improved moving average smoothing function that handles edge cases
     def moving_average(data, window_size=20):
@@ -2690,24 +2745,24 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     processed_data = {}
     for loc in locations:
         df = dfs[loc['key']]
-        
+
         # Get the data
         times = df['Time (s)'].values
         vdotn = df['VdotN'].values * 1000  # Convert from m/s to mm/s
         pressure = df['Total Pressure (Pa)'].values
-        
-        # Normalize time to start from 0
-        normalized_times = times - global_time_min
-        
+
+        # Apply time offset (0 for original time, global_time_min for normalized)
+        display_times = times - time_offset
+
         # Calculate acceleration
         dt = times[1] - times[0]  # Use original time for dt calculation
         dvdotn = np.diff(vdotn)
         adotn = np.append(dvdotn / dt, dvdotn[-1] / dt)  # Already in mm/s² since vdotn is in mm/s
-        
+
         # Find sign changes in original data before smoothing (for accurate zero crossings)
-        v_crossings = find_zero_crossings(normalized_times, vdotn)
-        a_crossings = find_zero_crossings(normalized_times, adotn)
-        p_crossings = find_zero_crossings(normalized_times, pressure)
+        v_crossings = find_zero_crossings(display_times, vdotn)
+        a_crossings = find_zero_crossings(display_times, adotn)
+        p_crossings = find_zero_crossings(display_times, pressure)
 
         # Apply smoothing to all data
         vdotn_smooth = moving_average(vdotn)
@@ -2721,7 +2776,7 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         
         # Store processed data for easy access during plotting
         processed_data[loc['key']] = {
-            'normalized_times': normalized_times,
+            'display_times': display_times,
             'times': times,
             'vdotn': vdotn_smooth,
             'pressure': pressure_smooth,
@@ -2730,20 +2785,21 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
             'a_crossings': a_crossings,
             'p_crossings': p_crossings
         }
-    
+
     # Add a small margin to prevent data from being exactly on the edge
     v_max *= 1.05
     a_max *= 1.05
     p_max *= 1.05
-    
+
     # Common settings for all subplots
     LABEL_SIZE = 11.2  # Reduced by 20% from 14
     TITLE_SIZE = 17  # Increased by 20% from 14
-    
-    # Create a custom colormap that transitions at the normalized inhale-exhale point
-    normalized_time_max = max([data['normalized_times'].max() for data in processed_data.values()])
-    norm = plt.Normalize(0, normalized_time_max)  # Start from 0 for normalized time
-    transition_norm = normalized_inhale_exhale / normalized_time_max
+
+    # Create a custom colormap that transitions at the inhale-exhale point
+    display_time_min = min([data['display_times'].min() for data in processed_data.values()])
+    display_time_max = max([data['display_times'].max() for data in processed_data.values()])
+    norm = plt.Normalize(display_time_min, display_time_max)
+    transition_norm = (display_inhale_exhale - display_time_min) / (display_time_max - display_time_min)
     
     # Ensure color points are in increasing order
     # Clamp transition points to valid range [0, 1]
@@ -2767,32 +2823,32 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     # Create the 3x3 grid of plots
     for i, loc in enumerate(locations):
         data = processed_data[loc['key']]
-        
+
         # Get the processed data
-        normalized_times = data['normalized_times']
+        display_times = data['display_times']
         vdotn = data['vdotn']
         pressure = data['pressure']
         adotn = data['adotn']
         v_crossings = data['v_crossings']
         a_crossings = data['a_crossings']
         p_crossings = data['p_crossings']
-        
+
         # Initialize label tracking for collision detection
         ax1_labels = []
         ax2_labels = []
         ax3_labels = []
-        
+
         # 1. Plot p vs v
         ax1 = fig.add_subplot(gs[i, 0])
-        scatter1 = ax1.scatter(vdotn, pressure, c=normalized_times, cmap=custom_cmap, norm=norm)
+        scatter1 = ax1.scatter(vdotn, pressure, c=display_times, cmap=custom_cmap, norm=norm)
         ax1.axvline(x=0, color='k', linestyle='--', alpha=0.5)
         ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        
+
         # Mark the zero crossings in the p vs v plot
         for v_cross in v_crossings:
-            t_idx = np.abs(normalized_times - v_cross).argmin()
+            t_idx = np.abs(display_times - v_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - v_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - v_cross)).argmin()
             p_at_cross = pressure[idx_at_cross]
             
             # Use smart positioning
@@ -2810,25 +2866,25 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
                        ha=ha, va=va)
         
         for p_cross in p_crossings:
-            t_idx = np.abs(normalized_times - p_cross).argmin()
+            t_idx = np.abs(display_times - p_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - p_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - p_cross)).argmin()
             v_at_cross = vdotn[idx_at_cross]
-            
+
             # Use smart positioning
             data_points = list(zip(vdotn, pressure))
             time_label = format_time_label(p_cross)
-            xytext, ha, va = smart_label_position(ax1, (v_at_cross, 0), time_label, 
+            xytext, ha, va = smart_label_position(ax1, (v_at_cross, 0), time_label,
                                                 ax1_labels, data_points)
             ax1_labels.append(xytext)
-            
-            ax1.annotate(time_label, 
-                       xy=(v_at_cross, 0), 
+
+            ax1.annotate(time_label,
+                       xy=(v_at_cross, 0),
                        xytext=xytext,
                        arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
                        color='black', fontsize=11, fontweight='bold',
                        ha=ha, va=va)
-        
+
         ax1.set_xlim(-v_max, v_max)
         ax1.set_ylim(-p_max, p_max)
         ax1.set_xlabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
@@ -2839,18 +2895,18 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
         for label in ax1.get_xticklabels() + ax1.get_yticklabels():
             label.set_fontweight('bold')
-        
+
         # 2. Plot p vs a
         ax2 = fig.add_subplot(gs[i, 1])
-        scatter2 = ax2.scatter(adotn, pressure, c=normalized_times, cmap=custom_cmap, norm=norm)
+        scatter2 = ax2.scatter(adotn, pressure, c=display_times, cmap=custom_cmap, norm=norm)
         ax2.axvline(x=0, color='k', linestyle='--', alpha=0.5)
         ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        
+
         # Mark the zero crossings in the p vs a plot
         for a_cross in a_crossings:
-            t_idx = np.abs(normalized_times - a_cross).argmin()
+            t_idx = np.abs(display_times - a_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - a_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - a_cross)).argmin()
             p_at_cross = pressure[idx_at_cross]
             
             # Use smart positioning
@@ -2868,25 +2924,25 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
                        ha=ha, va=va)
         
         for p_cross in p_crossings:
-            t_idx = np.abs(normalized_times - p_cross).argmin()
+            t_idx = np.abs(display_times - p_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - p_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - p_cross)).argmin()
             a_at_cross = adotn[idx_at_cross]
-            
+
             # Use smart positioning
             data_points = list(zip(adotn, pressure))
             time_label = format_time_label(p_cross)
-            xytext, ha, va = smart_label_position(ax2, (a_at_cross, 0), time_label, 
+            xytext, ha, va = smart_label_position(ax2, (a_at_cross, 0), time_label,
                                                 ax2_labels, data_points)
             ax2_labels.append(xytext)
-            
-            ax2.annotate(time_label, 
-                       xy=(a_at_cross, 0), 
+
+            ax2.annotate(time_label,
+                       xy=(a_at_cross, 0),
                        xytext=xytext,
                        arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
                        color='black', fontsize=11, fontweight='bold',
                        ha=ha, va=va)
-        
+
         ax2.set_xlim(-a_max, a_max)
         ax2.set_ylim(-p_max, p_max)
         ax2.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
@@ -2897,38 +2953,38 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
         for label in ax2.get_xticklabels() + ax2.get_yticklabels():
             label.set_fontweight('bold')
-        
+
         # 3. Plot v vs a
         ax3 = fig.add_subplot(gs[i, 2])
-        scatter3 = ax3.scatter(adotn, vdotn, c=normalized_times, cmap=custom_cmap, norm=norm)
+        scatter3 = ax3.scatter(adotn, vdotn, c=display_times, cmap=custom_cmap, norm=norm)
         ax3.axvline(x=0, color='k', linestyle='--', alpha=0.5)
         ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        
+
         # Mark the zero crossings in the v vs a plot
         for v_cross in v_crossings:
-            t_idx = np.abs(normalized_times - v_cross).argmin()
+            t_idx = np.abs(display_times - v_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - v_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - v_cross)).argmin()
             a_at_cross = adotn[idx_at_cross]
-            
+
             # Use smart positioning
             data_points = list(zip(adotn, vdotn))
             time_label = format_time_label(v_cross)
-            xytext, ha, va = smart_label_position(ax3, (a_at_cross, 0), time_label, 
+            xytext, ha, va = smart_label_position(ax3, (a_at_cross, 0), time_label,
                                                 ax3_labels, data_points)
             ax3_labels.append(xytext)
-            
-            ax3.annotate(time_label, 
-                       xy=(a_at_cross, 0), 
+
+            ax3.annotate(time_label,
+                       xy=(a_at_cross, 0),
                        xytext=xytext,
                        arrowprops=dict(arrowstyle="->", color='green', lw=1.5),
                        color='black', fontsize=11, fontweight='bold',
                        ha=ha, va=va)
-        
+
         for a_cross in a_crossings:
-            t_idx = np.abs(normalized_times - a_cross).argmin()
+            t_idx = np.abs(display_times - a_cross).argmin()
             # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(normalized_times - a_cross)).argmin()
+            idx_at_cross = (np.abs(display_times - a_cross)).argmin()
             v_at_cross = vdotn[idx_at_cross]
             
             # Use smart positioning
@@ -2961,9 +3017,12 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     cbar = plt.colorbar(scatter1, cax=cax)
     cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
     
-    # Add a note about the normalized time and smoothing
-    fig.text(0.5, 0.01, f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s. Data smoothed with moving average (window size: 20).', 
-            fontsize=10, ha='center', va='bottom')
+    # Add a note about the time mode and smoothing
+    if use_original_time:
+        note_text = f'Note: Using original timestamps. Inhale-exhale transition at {display_inhale_exhale:.3f}s.\nData smoothed with moving average (window size: 20).'
+    else:
+        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {display_inhale_exhale:.3f}s. Data smoothed with moving average (window size: 20).'
+    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
     
     # Add overall title
     fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Smoothed Version with Zero-Crossing Markers)', 
@@ -2977,12 +3036,13 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         pdf.savefig(fig)
     
     # Save a standalone PDF version to pdfs directory
+    time_suffix = "_original_time" if use_original_time else "_normalized_time"
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smoothed_with_markers.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_smoothed_with_markers.pdf"
+        standalone_filename = f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     
@@ -3669,15 +3729,44 @@ def track_fixed_patch_region_in_file(file_path: Path, point_pairs: list) -> dict
 
 # Smoothed flow profile generation functions removed - smoothing is now done in-memory during analysis
 
-def auto_detect_visualization_timestep(subject_name: str) -> Tuple[float, int]:
+def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str = None) -> Tuple[float, int]:
     """
-    Auto-detect the appropriate timestep for visualization using the same logic as patch highlighting.
-    
+    Auto-detect the appropriate timestep for visualization.
+
+    Priority:
+    1. HDF5 metadata (if exists) - most reliable for plotting mode
+    2. CSV files + flow profile - for patch-selection mode
+
+    Args:
+        subject_name: Name of the subject
+        flow_profile_path: Optional explicit path to flow profile CSV file
+
     Returns:
         Tuple of (timestep_value, display_timestep_ms) where:
-        - timestep_value: Raw timestep value to use for visualization 
+        - timestep_value: Raw timestep value to use for visualization
         - display_timestep_ms: Timestep converted to milliseconds for display
     """
+    # Priority 1: Check HDF5 file for breathing cycle metadata (most reliable)
+    # Check results folder first, then root for backwards compatibility
+    hdf5_file_path = Path(f'{subject_name}_results/{subject_name}_cfd_data.h5')
+    if not hdf5_file_path.exists():
+        hdf5_file_path = Path(f'{subject_name}_cfd_data.h5')  # Backwards compatibility
+    if hdf5_file_path.exists():
+        try:
+            import h5py
+            with h5py.File(hdf5_file_path, 'r') as f:
+                if 'time_points' in f:
+                    time_points = f['time_points'][:]
+                    if len(time_points) > 0:
+                        # First time point in HDF5 is already filtered to breathing cycle
+                        first_time_s = time_points[0]
+                        display_timestep = int(first_time_s * 1000)  # Convert to ms
+                        print(f"🎯 Auto-detected timestep {display_timestep}ms from HDF5 (first in breathing cycle)")
+                        return first_time_s * 1000, display_timestep  # Return in ms for consistency
+        except Exception as e:
+            print(f"⚠️  Warning: Could not read HDF5 metadata: {e}")
+
+    # Priority 2: Fall back to CSV files + flow profile detection
     # Check for patched XYZ files first
     xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
     if not xyz_dir.exists():
@@ -3686,13 +3775,13 @@ def auto_detect_visualization_timestep(subject_name: str) -> Tuple[float, int]:
         if not xyz_dir.exists():
             print("⚠️  Warning: No XYZ directory found, using default 100ms")
             return 100.0, 100
-    
+
     # Get available timesteps
     available_files = list(xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
     if not available_files:
         print("⚠️  Warning: No XYZ files found, using default 100ms")
         return 100.0, 100
-    
+
     # Sort files in natural chronological order
     timestep_file_pairs = []
     for file_path in available_files:
@@ -3701,24 +3790,24 @@ def auto_detect_visualization_timestep(subject_name: str) -> Tuple[float, int]:
             timestep_file_pairs.append((timestep, file_path))
         except ValueError:
             continue
-    
+
     if not timestep_file_pairs:
         print("⚠️  Warning: No valid timesteps found, using default 100ms")
         return 100.0, 100
-    
+
     # Sort by timestep value (natural chronological order)
     timestep_file_pairs.sort(key=lambda x: x[0])
     sorted_files = [file_path for timestep, file_path in timestep_file_pairs]
-    
+
     # Filter files to only include those within the breathing cycle (same as tracking)
-    start_time, end_time = find_breathing_cycle_bounds(subject_name)
+    start_time, end_time = find_breathing_cycle_bounds(subject_name, flow_profile_path)
     if start_time is not None and end_time is not None:
         filtered_files = filter_xyz_files_by_time(sorted_files, start_time, end_time)
         if filtered_files:
             # Use the first file from the breathing cycle (same as tracking analysis)
             first_file = filtered_files[0]
             visualization_timestep = extract_timestep_from_filename(first_file)
-            
+
             # Convert to milliseconds for display message only
             if 'e+' in first_file.stem or 'e-' in first_file.stem:
                 # Scientific notation - likely in seconds
@@ -3726,19 +3815,19 @@ def auto_detect_visualization_timestep(subject_name: str) -> Tuple[float, int]:
             else:
                 # Likely already in milliseconds
                 display_timestep = int(visualization_timestep)
-            
+
             print(f"🎯 Auto-detected timestep {display_timestep}ms for visualization (first file in breathing cycle)")
             return visualization_timestep, display_timestep
         else:
             print("⚠️  Warning: No files found within breathing cycle, using first available file")
     else:
         print("⚠️  Warning: Could not determine breathing cycle bounds, using first available file")
-    
+
     # Use first available file as fallback
     first_timestep = timestep_file_pairs[0][0]
     first_file = timestep_file_pairs[0][1]
     visualization_timestep = first_timestep
-    
+
     # Convert to milliseconds for display message only
     if 'e+' in first_file.stem or 'e-' in first_file.stem:
         display_timestep = int(first_timestep * 1000)
@@ -3761,9 +3850,22 @@ def main(overwrite_existing: bool = False,
          surface_timestep: int = 1,
          interactive_selector: bool = False,
          selector_timestep: int = 100,
-         smoothing_window: int = 20):
+         smoothing_window: int = 20,
+         patch_selection_mode: bool = False,
+         plotting_mode: bool = False,
+         has_remesh: bool = False,
+         remesh_before: str = None,
+         remesh_after: str = None,
+         flow_profile_path: str = None):
     """
     Main function to process CFD data and generate analysis plots.
+
+    Two-phase workflow:
+    - Phase 1 (--patch-selection): Create HDF5, interactive HTML, and template JSON
+    - Phase 2 (--plotting): Generate analysis and plots using tracking JSON
+
+    Remesh handling:
+    - If --has-remesh is set, use coordinate-based mapping across mesh changes
     """
     # Determine subject name
     if subject_name is None:
@@ -3789,7 +3891,7 @@ def main(overwrite_existing: bool = False,
     if highlight_patches:
         # Use consistent timestep detection logic
         if patch_timestep == 100:  # Only auto-detect if using default
-            patch_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
+            patch_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
             print(f"\n🎨 Highlight-patches mode: {display_timestep}ms")
         else:
             print(f"\n🎨 Highlight-patches mode: Using specified timestep {patch_timestep}ms")
@@ -3820,6 +3922,11 @@ def main(overwrite_existing: bool = False,
                     print("Make sure the visualization dependencies are installed")
                     return
         
+        # Find HDF5 file (check results folder first, then root for backwards compatibility)
+        hdf5_path = f"{subject_name}_results/{subject_name}_cfd_data.h5"
+        if not Path(hdf5_path).exists():
+            hdf5_path = f"{subject_name}_cfd_data.h5"
+
         # Run visualization
         try:
             fig = visualize_patch_regions(
@@ -3828,12 +3935,12 @@ def main(overwrite_existing: bool = False,
                 patch_radii=patch_radii,
                 use_pipeline_data=True,
                 normal_angle_threshold=normal_angle_threshold,
-                hdf5_file_path=f"{subject_name}_cfd_data.h5"  # Use HDF5 data instead of CSV
+                hdf5_file_path=hdf5_path
             )
             
             if fig:
                 print(f"✅ Patch highlighting completed successfully!")
-                print(f"📁 Interactive visualization saved as: {subject_name}_patch_regions_t{patch_timestep}.html")
+                print(f"📁 Interactive visualization saved as: {subject_name}_patch_regions_t{int(round(patch_timestep))}ms.html")
             else:
                 print("❌ Patch highlighting failed!")
                 
@@ -3951,11 +4058,312 @@ def main(overwrite_existing: bool = False,
             print("📊 No points were selected")
         
         return  # Exit early for interactive selector mode
-    
+
+    # Handle patch-selection mode (Phase 1: Create HDF5, HTML, and template JSON)
+    if patch_selection_mode:
+        print(f"\n📋 Patch Selection Mode: Phase 1 of two-phase workflow")
+        print("   This mode will:")
+        print("   1. Convert raw CSV files to HDF5 format")
+        print("   2. Create interactive HTML for patch/face selection")
+        print("   3. Create template tracking locations JSON")
+        print("   4. Skip all analysis and plotting")
+
+        # Import required functions
+        from utils.file_processing import (
+            find_flow_profile_file,
+            validate_subject_files,
+            create_template_tracking_locations,
+            ask_remesh_questions_interactive
+        )
+        from data_processing.trajectory import auto_select_csv_to_hdf5_method, store_remesh_metadata
+
+        # Create results directory structure
+        results_dir = Path(f'{subject_name}_results')
+        interactive_dir = results_dir / 'interactive'
+        for dir_path in [results_dir, interactive_dir, results_dir / 'tracked_points',
+                         results_dir / 'figures', results_dir / 'reports']:
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+        print(f"\n📁 Created results directory structure: {results_dir}")
+
+        # Find raw CSV files
+        raw_xyz_dir = Path(raw_dir) if raw_dir else Path(f'{subject_name}_xyz_tables')
+        if not raw_xyz_dir.exists():
+            # Try patched directory
+            raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+
+        if not raw_xyz_dir.exists():
+            print(f"❌ No XYZ directory found for {subject_name}")
+            print(f"   Expected: {subject_name}_xyz_tables or {subject_name}_xyz_tables_with_patches")
+            return
+
+        xyz_files = list(raw_xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
+        if not xyz_files:
+            print(f"❌ No CSV files found in {raw_xyz_dir}")
+            return
+
+        print(f"📊 Found {len(xyz_files)} CSV files in {raw_xyz_dir}")
+
+        # Sort files chronologically
+        timestep_file_pairs = []
+        for file_path in xyz_files:
+            try:
+                timestep = extract_timestep_from_filename(file_path)
+                timestep_file_pairs.append((timestep, file_path))
+            except ValueError:
+                continue
+        timestep_file_pairs.sort(key=lambda x: x[0])
+        xyz_files = [f for _, f in timestep_file_pairs]
+
+        # Ask about remesh configuration
+        remesh_info = ask_remesh_questions_interactive(xyz_files)
+
+        # Filter by breathing cycle using explicit flow profile
+        try:
+            start_time, end_time = find_breathing_cycle_bounds(subject_name, flow_profile_path)
+            if start_time is not None and end_time is not None:
+                xyz_files = filter_xyz_files_by_time(xyz_files, start_time, end_time)
+                print(f"🫁 Filtered to breathing cycle: {start_time:.1f}ms - {end_time:.1f}ms")
+                print(f"   {len(xyz_files)} files in breathing cycle")
+        except Exception as e:
+            print(f"⚠️  Could not filter by breathing cycle: {e}")
+
+        # Convert to HDF5 with breathing cycle metadata (save in results folder)
+        hdf5_file_path = f"{subject_name}_results/{subject_name}_cfd_data.h5"
+        print(f"\n🚀 Converting CSV to HDF5: {hdf5_file_path}")
+        try:
+            data_info = auto_select_csv_to_hdf5_method(
+                xyz_files, hdf5_file_path, overwrite_existing,
+                breathing_cycle_start_ms=start_time,
+                breathing_cycle_end_ms=end_time
+            )
+            print(f"✅ HDF5 conversion complete: {data_info['file_path']}")
+
+            # Store remesh metadata in HDF5
+            store_remesh_metadata(
+                hdf5_file_path,
+                has_remesh=remesh_info['has_remesh'],
+                remesh_before_file=remesh_info.get('remesh_before_file'),
+                remesh_after_file=remesh_info.get('remesh_after_file'),
+                remesh_timestep_ms=remesh_info.get('remesh_timestep_ms'),
+                remesh_events=remesh_info.get('remesh_events', [])
+            )
+
+            # Store flow profile in HDF5 (so Phase 2 doesn't need the CSV file)
+            if flow_profile_path:
+                from data_processing.trajectory import store_flow_profile
+                store_flow_profile(hdf5_file_path, flow_profile_path)
+        except Exception as e:
+            print(f"❌ HDF5 conversion failed: {e}")
+            return
+
+        # Create interactive HTML
+        print(f"\n🎨 Creating interactive HTML visualization...")
+        try:
+            visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
+            print(f"   Using timestep: {display_timestep}ms (first file in breathing cycle)")
+
+            if Path(hdf5_file_path).exists():
+                plot_3d_interactive_all_patches(hdf5_file_path, [], subject_name, interactive_dir, time_point=display_timestep)
+            elif xyz_files:
+                plot_3d_interactive_all_patches(xyz_files[0], [], subject_name, interactive_dir)
+
+            print(f"✅ Interactive HTML created in: {interactive_dir}")
+        except Exception as e:
+            print(f"❌ Failed to create interactive HTML: {e}")
+
+        # Create template tracking locations JSON (with remesh info if applicable)
+        print(f"\n📋 Creating template tracking locations file...")
+        template_file = create_template_tracking_locations(subject_name, results_dir, remesh_info)
+
+        print(f"\n" + "="*60)
+        print("✅ PATCH SELECTION MODE COMPLETE")
+        print("="*60)
+        print(f"\nNext steps:")
+        print(f"1. Open the interactive HTML in your browser:")
+        print(f"   {interactive_dir}/{subject_name}_surface_patches_interactive_first_breathing_cycle_t{display_timestep}ms.html")
+        print(f"\n2. Hover over points to identify Patch Number and Face Index")
+        print(f"\n3. Edit the template tracking locations file:")
+        print(f"   {template_file}")
+        print(f"\n4. Run Phase 2 (plotting mode) to generate analysis:")
+        print(f"   python src/main.py --subject {subject_name} --plotting")
+        print(f"   (Flow profile is embedded in HDF5 - no need to specify again)")
+        print("="*60)
+
+        return  # Exit early for patch-selection mode
+
+    # Handle plotting mode (Phase 2: Generate analysis using existing HDF5 and JSON)
+    if plotting_mode:
+        print(f"\n📊 Plotting Mode: Phase 2 of two-phase workflow")
+        print("   This mode will:")
+        print("   1. Use existing HDF5 file (skip CSV processing)")
+        print("   2. Load tracking locations from results folder")
+        print("   3. Generate all analysis, tracking, and plots")
+
+        # Check for HDF5 file (results folder first, then root for backwards compatibility)
+        hdf5_file_path = f"{subject_name}_results/{subject_name}_cfd_data.h5"
+        if not Path(hdf5_file_path).exists():
+            hdf5_file_path = f"{subject_name}_cfd_data.h5"  # Backwards compatibility
+        if not Path(hdf5_file_path).exists():
+            print(f"❌ HDF5 file not found in:")
+            print(f"   - {subject_name}_results/{subject_name}_cfd_data.h5")
+            print(f"   - {subject_name}_cfd_data.h5")
+            print(f"   Run --patch-selection first to create it")
+            return
+
+        print(f"✅ Found HDF5 file: {hdf5_file_path}")
+
+        # Check if flow profile is in HDF5 (stored during Phase 1)
+        from data_processing.trajectory import has_flow_profile, get_flow_profile
+        if not flow_profile_path and has_flow_profile(hdf5_file_path):
+            print(f"📊 Using flow profile embedded in HDF5 (no --flow-profile needed)")
+            # Create a temporary file for the flow profile
+            import tempfile
+            flow_df = get_flow_profile(hdf5_file_path)
+            if flow_df is not None:
+                temp_flow_file = Path(tempfile.gettempdir()) / f"{subject_name}_flow_profile_from_hdf5.csv"
+                flow_df.to_csv(temp_flow_file, index=False)
+                flow_profile_path = str(temp_flow_file)
+                print(f"   Extracted to: {temp_flow_file}")
+        elif not flow_profile_path:
+            print(f"⚠️  No flow profile provided and none found in HDF5")
+            print(f"   Some analysis features may be limited")
+
+        # Read remesh info from HDF5 (stored during Phase 1)
+        from data_processing.trajectory import get_remesh_metadata
+        remesh_metadata = get_remesh_metadata(hdf5_file_path)
+
+        # Handle remesh: either from HDF5 metadata or from command line flags
+        should_process_remesh = remesh_metadata.get('has_remesh', False) or has_remesh
+        remesh_events_from_hdf5 = remesh_metadata.get('remesh_events', [])
+
+        if should_process_remesh:
+            print(f"\n🔄 Remesh handling enabled")
+            from utils.file_processing import update_tracking_locations_for_remesh, update_tracking_locations_for_multiple_remesh
+
+            # Find xyz_tables directory
+            xyz_dirs = [
+                Path(f'{subject_name}_xyz_tables_with_patches'),
+                Path(f'{subject_name}_xyz_tables'),
+                Path(raw_dir) if raw_dir else None
+            ]
+            xyz_dirs = [d for d in xyz_dirs if d and d.exists()]
+            xyz_tables_dir = xyz_dirs[0] if xyz_dirs else None
+
+            if not xyz_tables_dir:
+                print(f"❌ No xyz_tables directory found for remesh processing")
+                return
+
+            # Load current tracking config
+            tracking_config = load_tracking_locations(subject_name=subject_name)
+
+            # Check if we have multiple remesh events
+            if len(remesh_events_from_hdf5) > 1:
+                # Multiple remesh events - use new multi-remesh function
+                print(f"   Processing {len(remesh_events_from_hdf5)} remesh events from HDF5 metadata")
+
+                # Check if post_remesh_list already exists with correct count
+                has_existing_mappings = all(
+                    loc.get('post_remesh_list') and len(loc['post_remesh_list']) == len(remesh_events_from_hdf5)
+                    for loc in tracking_config.get('locations', [])
+                )
+
+                if has_existing_mappings:
+                    print(f"   ✅ Post-remesh mappings already exist for all {len(remesh_events_from_hdf5)} events")
+                else:
+                    updated_config = update_tracking_locations_for_multiple_remesh(
+                        tracking_config, remesh_events_from_hdf5, xyz_tables_dir
+                    )
+
+                    # Save updated config
+                    results_dir = Path(f'{subject_name}_results')
+                    updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
+                    with open(updated_json_path, 'w') as f:
+                        json.dump(updated_config, f, indent=2)
+                    print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+            else:
+                # Single remesh event - use original function
+                # Determine remesh files: prefer HDF5 metadata, fall back to command line
+                if remesh_metadata.get('has_remesh', False):
+                    remesh_before_file = remesh_metadata.get('remesh_before_file')
+                    remesh_after_file = remesh_metadata.get('remesh_after_file')
+                    print(f"   Using remesh info from HDF5 metadata")
+                else:
+                    remesh_before_file = remesh_before
+                    remesh_after_file = remesh_after
+                    print(f"   Using remesh info from command line")
+
+                if remesh_before_file is None or remesh_after_file is None:
+                    print(f"❌ Remesh requires both before and after CSV filenames")
+                    return
+
+                # Find the actual file paths
+                before_path = None
+                after_path = None
+                for xyz_dir in xyz_dirs:
+                    candidate_before = xyz_dir / remesh_before_file
+                    candidate_after = xyz_dir / remesh_after_file
+                    before_matches = list(xyz_dir.glob(f'*{remesh_before_file}*'))
+                    after_matches = list(xyz_dir.glob(f'*{remesh_after_file}*'))
+
+                    if candidate_before.exists():
+                        before_path = candidate_before
+                    elif before_matches:
+                        before_path = before_matches[0]
+
+                    if candidate_after.exists():
+                        after_path = candidate_after
+                    elif after_matches:
+                        after_path = after_matches[0]
+
+                    if before_path and after_path:
+                        break
+
+                if not before_path or not before_path.exists():
+                    print(f"❌ Before-remesh file not found: {remesh_before_file}")
+                    print(f"   Searched in: {[str(d) for d in xyz_dirs]}")
+                    return
+                if not after_path or not after_path.exists():
+                    print(f"❌ After-remesh file not found: {remesh_after_file}")
+                    print(f"   Searched in: {[str(d) for d in xyz_dirs]}")
+                    return
+
+                print(f"   Before file: {before_path}")
+                print(f"   After file: {after_path}")
+
+                # Check if post_remesh mappings already exist and are valid
+                # Accept either post_remesh (old style) or post_remesh_list (new style)
+                has_existing_mappings = all(
+                    loc.get('post_remesh') is not None or (loc.get('post_remesh_list') and len(loc['post_remesh_list']) > 0)
+                    for loc in tracking_config.get('locations', [])
+                )
+
+                if has_existing_mappings:
+                    print(f"   ✅ Post-remesh mappings already exist in tracking JSON")
+                else:
+                    # Calculate post_remesh mappings (preserves original patch/face)
+                    updated_config = update_tracking_locations_for_remesh(
+                        tracking_config, before_path, after_path
+                    )
+
+                    # Save updated config
+                    results_dir = Path(f'{subject_name}_results')
+                    updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
+                    with open(updated_json_path, 'w') as f:
+                        json.dump(updated_config, f, indent=2)
+                    print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+        else:
+            print(f"   No remesh detected - using consistent patch/face indices")
+
+        # Force processing to continue with plotting
+        overwrite_existing = False  # Don't reprocess, just use existing HDF5
+        # Continue to regular processing below...
+        print(f"   Continuing with analysis and plotting...")
+
     # Import smart file resolution functions
     from utils.file_processing import (
-        find_flow_profile_file, 
-        validate_subject_files, 
+        find_flow_profile_file,
+        validate_subject_files,
         create_variant_tracking_locations
     )
     
@@ -4008,8 +4416,21 @@ def main(overwrite_existing: bool = False,
     tracking_config = load_tracking_locations(subject_name=subject_name)
     tracking_locations = tracking_config['locations']  # Extract just the locations for compatibility
     all_files_exist = True
-    
-    # Check if tracked point files exist (single point only)
+
+    # PHASE 2 PLOTTING: Always regenerate tracking CSVs to include patch analysis
+    # This ensures patch radius analysis runs even if single-point CSVs exist
+    if plotting_mode:
+        print("📊 Plotting mode: Will regenerate all tracking data (including patch analysis)")
+        all_files_exist = False  # Force regeneration
+
+    # FRESH CASE FIX: If no tracking locations defined, force processing to create interactive HTML
+    # This allows users to run pipeline on fresh cases to generate visualization for point selection
+    if len(tracking_locations) == 0:
+        print("📋 No tracking locations defined - fresh case detected")
+        print("   Will create interactive HTML for patch/face selection")
+        all_files_exist = False  # Force processing
+
+    # Check if tracked point files exist (single point only) AND have correct format
     for location in tracking_locations:
         patch_number = location['patch_number']
         face_index = location['face_indices'][0]
@@ -4018,13 +4439,29 @@ def main(overwrite_existing: bool = False,
         if not single_file.exists():
             all_files_exist = False
             break
+        else:
+            # Check if file has the Time_normalized (s) column (new format)
+            try:
+                header_df = pd.read_csv(single_file, nrows=0)
+                if 'Time_normalized (s)' not in header_df.columns:
+                    print(f"📋 CSV file missing Time_normalized column: {single_file.name}")
+                    print("   Will regenerate with updated format")
+                    all_files_exist = False
+                    break
+            except Exception:
+                all_files_exist = False
+                break
     
-    # Set HDF5 file path before processing (needed for visualization)
-    hdf5_file_path = f"{subject_name}_cfd_data.h5"
-    
+    # Set HDF5 file path before processing (check results folder first, then root for backwards compatibility)
+    hdf5_file_path = f"{subject_name}_results/{subject_name}_cfd_data.h5"
+    if not Path(hdf5_file_path).exists():
+        legacy_path = f"{subject_name}_cfd_data.h5"
+        if Path(legacy_path).exists():
+            hdf5_file_path = legacy_path  # Use legacy location if it exists
+
     # Only process raw data if needed
     if overwrite_existing or not all_files_exist:
-        
+
         if Path(hdf5_file_path).exists() and not overwrite_existing:
             print(f"\n🚀 Found existing HDF5 cache: {hdf5_file_path}")
             print("Using cached data for fast tracking (skipping CSV processing)...")
@@ -4105,9 +4542,9 @@ def main(overwrite_existing: bool = False,
             xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
             
             print(f"Found {len(xyz_files)} XYZ table files")
-            
-            # Find breathing cycle bounds from flow profile
-            start_time, end_time = find_breathing_cycle_bounds(subject_name)
+
+            # Find breathing cycle bounds using explicit flow profile
+            start_time, end_time = find_breathing_cycle_bounds(subject_name, flow_profile_path)
             if start_time is None or end_time is None:
                 print("Error: Could not determine breathing cycle bounds!")
                 return
@@ -4131,10 +4568,10 @@ def main(overwrite_existing: bool = False,
         
         # Create interactive visualization using consistent timestep detection
         print("\nCreating interactive visualization...")
-        
+
         # Use the same timestep detection as patch highlighting
         try:
-            visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
+            visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
             print(f"Using consistent timestep: {display_timestep}ms")
             
             # Try HDF5 first with the detected timestep
@@ -4155,36 +4592,179 @@ def main(overwrite_existing: bool = False,
         
         # Process each tracking point
         print("\nProcessing tracking points...")
-        for location in tracking_locations:
+
+        # Get breathing cycle metadata for time normalization
+        from data_processing.trajectory import get_breathing_cycle_metadata
+        breathing_metadata = get_breathing_cycle_metadata(hdf5_file_path) if Path(hdf5_file_path).exists() else {}
+        start_time = breathing_metadata.get('breathing_cycle_start_ms', 0.0)
+
+        # Fallback: get from flow profile if HDF5 metadata is missing
+        if start_time == 0.0 and flow_profile_path:
+            bc_start, bc_end = find_breathing_cycle_bounds(subject_name, flow_profile_path)
+            if bc_start is not None:
+                start_time = bc_start
+                print(f"📊 Using breathing cycle start from flow profile: {start_time:.2f}ms")
+
+        if start_time > 0:
+            print(f"📊 Time normalization offset: {start_time:.2f}ms")
+        else:
+            print(f"⚠️  No breathing cycle metadata found - time normalization offset will be 0")
+
+        # Get remesh metadata for split-chunk tracking
+        from data_processing.trajectory import get_remesh_metadata
+        remesh_metadata = get_remesh_metadata(hdf5_file_path) if Path(hdf5_file_path).exists() else {'has_remesh': False, 'remesh_events': []}
+        has_remesh = remesh_metadata.get('has_remesh', False)
+        remesh_events = remesh_metadata.get('remesh_events', [])
+        remesh_timestep_ms = remesh_metadata.get('remesh_timestep_ms', None)  # Backward compat
+
+        if has_remesh and remesh_events:
+            print(f"\n🔄 Remesh detected: {len(remesh_events)} event(s)")
+            for i, event in enumerate(remesh_events, 1):
+                print(f"   #{i}: boundary at {event['timestep_ms']:.1f}ms")
+            if len(remesh_events) == 1:
+                print(f"   Chunk 0: t < {remesh_events[0]['timestep_ms']:.1f}ms (original mesh)")
+                print(f"   Chunk 1: t >= {remesh_events[0]['timestep_ms']:.1f}ms (remeshed)")
+            else:
+                print(f"   Chunk 0: t < {remesh_events[0]['timestep_ms']:.1f}ms (original mesh)")
+                for i, event in enumerate(remesh_events[:-1]):
+                    next_event = remesh_events[i+1]
+                    print(f"   Chunk {i+1}: {event['timestep_ms']:.1f}ms <= t < {next_event['timestep_ms']:.1f}ms")
+                print(f"   Chunk {len(remesh_events)}: t >= {remesh_events[-1]['timestep_ms']:.1f}ms")
+
+        # Track which locations were updated (for coordinate auto-update)
+        locations_updated = False
+
+        for idx, location in enumerate(tracking_locations):
             patch_number = location['patch_number']
             face_index = location['face_indices'][0]
             description = location['description']
-            
+
+            # VALIDATION: Skip placeholder locations (patch=0, face=0)
+            if patch_number == 0 and face_index == 0:
+                print(f"\n⏭️  Skipping '{description}' - placeholder values (patch=0, face=0)")
+                print(f"   Update the tracking locations JSON with correct values first")
+                continue
+
+            # Check if description contains placeholder text - only warn, don't skip if valid patch/face
+            if "UPDATE THIS" in description.upper():
+                print(f"\n⚠️  Note: '{description}' has placeholder description")
+                print(f"   Consider updating the description in tracking locations JSON")
+                # Continue processing since patch/face values are valid
+
             print(f"\nProcessing {description}")
             print(f"Tracking point: Patch {patch_number}, Face {face_index}")
-            
+
             # Process single point
             print("\nProcessing single point...")
-            
-            # Check if we should use HDF5 cache or CSV files
-            if Path(hdf5_file_path).exists() and len(xyz_files) == 0:
-                # Use HDF5 cache for tracking (much faster) with auto-selection
-                single_point_data = auto_select_hdf5_point_tracking_method(hdf5_file_path, patch_number, face_index)
+
+            # Check if this location needs split-chunk tracking (has remesh and post_remesh mappings)
+            post_remesh = location.get('post_remesh', None)
+            post_remesh_list = location.get('post_remesh_list', [])
+
+            # Use post_remesh_list if available, otherwise fall back to single post_remesh
+            if not post_remesh_list and post_remesh:
+                post_remesh_list = [post_remesh]
+
+            use_split_chunk = has_remesh and remesh_events and len(post_remesh_list) > 0
+
+            if use_split_chunk:
+                # MULTI-CHUNK TRACKING: Use different patch/face for each mesh segment
+                n_events = len(remesh_events)
+                n_chunks = n_events + 1
+
+                print(f"🔄 Multi-chunk tracking enabled ({n_chunks} chunks for {n_events} remesh event(s)):")
+
+                all_chunk_data = []
+
+                # Track each chunk with appropriate patch/face
+                for chunk_idx in range(n_chunks):
+                    if chunk_idx == 0:
+                        # First chunk: original mesh, t < first_remesh
+                        chunk_patch = patch_number
+                        chunk_face = face_index
+                        t_start = 0
+                        t_end = remesh_events[0]['timestep_ms']
+                        chunk_label = f"Chunk 0 (original)"
+                    else:
+                        # Subsequent chunks: use post_remesh mapping
+                        if chunk_idx - 1 < len(post_remesh_list):
+                            mapping = post_remesh_list[chunk_idx - 1]
+                            chunk_patch = mapping.get('patch_number')
+                            chunk_face = mapping.get('face_index')
+                        else:
+                            # Fallback if mapping missing
+                            print(f"   ⚠️  Missing post_remesh mapping for chunk {chunk_idx}, using previous")
+                            chunk_patch = chunk_patch  # Keep previous
+                            chunk_face = chunk_face
+
+                        t_start = remesh_events[chunk_idx - 1]['timestep_ms']
+                        if chunk_idx < n_events:
+                            t_end = remesh_events[chunk_idx]['timestep_ms']
+                        else:
+                            t_end = float('inf')
+                        chunk_label = f"Chunk {chunk_idx} (after remesh #{chunk_idx})"
+
+                    print(f"   {chunk_label}: Patch {chunk_patch}, Face {chunk_face}, {t_start:.1f}ms <= t < {t_end:.1f}ms")
+
+                    # Track this chunk
+                    if Path(hdf5_file_path).exists() and len(xyz_files) == 0:
+                        chunk_data = auto_select_hdf5_point_tracking_method(hdf5_file_path, chunk_patch, chunk_face)
+                    else:
+                        chunk_data = track_point_parallel(xyz_files, chunk_patch, chunk_face)
+
+                    # Filter to time range
+                    if chunk_data:
+                        if t_end == float('inf'):
+                            filtered = [p for p in chunk_data if p.get('time_ms', 0) >= t_start]
+                        else:
+                            filtered = [p for p in chunk_data if t_start <= p.get('time_ms', 0) < t_end]
+                        print(f"      → {len(filtered)} timesteps")
+                        all_chunk_data.extend(filtered)
+                    else:
+                        print(f"      → Warning: No data found")
+
+                # Merge and sort all chunks
+                single_point_data = all_chunk_data
+                single_point_data.sort(key=lambda p: p.get('time_ms', 0))
+
+                print(f"   Total merged: {len(single_point_data)} timesteps")
             else:
-                # Use parallel processing for single point tracking from CSV
-                single_point_data = track_point_parallel(xyz_files, patch_number, face_index)
-            
+                # Standard single-chunk tracking (no remesh)
+                if Path(hdf5_file_path).exists() and len(xyz_files) == 0:
+                    single_point_data = auto_select_hdf5_point_tracking_method(hdf5_file_path, patch_number, face_index)
+                else:
+                    single_point_data = track_point_parallel(xyz_files, patch_number, face_index)
+
             if single_point_data:
                 print(f"Tracked single point through {len(single_point_data)} time steps")
-                save_trajectory_data(single_point_data, subject_name, patch_number, face_index, description, is_region=False)
+                save_trajectory_data(single_point_data, subject_name, patch_number, face_index, description, is_region=False, time_offset_ms=start_time)
+
+                # AUTO-UPDATE COORDINATES: Extract from first time point
+                first_point = single_point_data[0]
+                new_coords = [first_point['x'], first_point['y'], first_point['z']]
+                old_coords = location.get('coordinates', [0.0, 0.0, 0.0])
+
+                # Update if coordinates were placeholder or missing
+                if old_coords == [0.0, 0.0, 0.0] or old_coords != new_coords:
+                    tracking_config['locations'][idx]['coordinates'] = new_coords
+                    locations_updated = True
+                    print(f"   📍 Updated coordinates: ({new_coords[0]:.6f}, {new_coords[1]:.6f}, {new_coords[2]:.6f})")
             else:
                 print(f"Warning: No trajectory found for single point")
             
             # Process patch regions if enabled
             if enable_patch_analysis:
+                # Note: Patch region analysis is skipped for remeshed locations
+                # because the spatial relationship of nearby points changes across remesh
+                if use_split_chunk:
+                    print(f"\n⚠️  Skipping patch region analysis for '{description}' - location has remesh")
+                    print(f"   Patch analysis tracks neighboring points which change across remesh")
+                    print(f"   Single point tracking above handles remesh correctly")
+                    continue  # Skip to next location
+
                 if patch_radii is None:
                     patch_radii = [0.002]  # Default: 2mm only (faster processing)
-                
+
                 print(f"\nProcessing patch regions...")
                 print(f"Patch radii: {[f'{r*1000:.1f}mm' for r in patch_radii]}")
                 print(f"Normal angle threshold: {normal_angle_threshold}° (surface normal filtering)")
@@ -4227,10 +4807,18 @@ def main(overwrite_existing: bool = False,
                         print(f"  Tracked {radius_mm:.1f}mm patch through {len(patch_data)} time steps")
                         # Save with modified description to indicate patch analysis
                         patch_description = f"{description} (Fixed Patch {radius_mm:.1f}mm)"
-                        save_trajectory_data(patch_data, subject_name, patch_number, face_index, patch_description, is_region=True)
+                        save_trajectory_data(patch_data, subject_name, patch_number, face_index, patch_description, is_region=True, time_offset_ms=start_time)
                     else:
                         print(f"  Warning: No trajectory found for {radius_mm:.1f}mm patch")
         
+        # Save updated tracking config if coordinates were updated
+        if locations_updated:
+            # Save to results folder (json already imported at top of file)
+            updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
+            with open(updated_json_path, 'w') as f:
+                json.dump(tracking_config, f, indent=2)
+            print(f"\n📋 Updated tracking locations saved with coordinates: {updated_json_path}")
+
         # Process combinations after individual points are done
         print("\nProcessing combinations...")
         combination_files = process_all_combinations(subject_name, tracking_config)
@@ -4275,21 +4863,33 @@ def main(overwrite_existing: bool = False,
         print("Warning: Could not find inhale-exhale transition in flow profile")
         inhale_exhale_transition = None
     
-    # Find the posterior border of soft palate data
-    soft_palate_data = None
+    # Find reference location data for key time point analysis
+    # First try "Posterior border of soft palate", otherwise use the first available location
+    reference_data = None
+    reference_name = None
     for location in tracking_locations:
-        if location['description'] == 'Posterior border of soft palate':
-            patch_number = location['patch_number']
-            face_index = location['face_indices'][0]
-            description = location['description']
-            data_file = output_dir / f"{subject_name}_patch{patch_number}_face{face_index}_{description.lower().replace(' ', '_')}.csv"
-            
-            if data_file.exists():
-                soft_palate_data = pd.read_csv(data_file)
-                print(f"Loaded data for posterior border of soft palate")
-            else:
-                print(f"Warning: No data file found for posterior border of soft palate")
-            break
+        patch_number = location['patch_number']
+        face_index = location['face_indices'][0]
+        description = location['description']
+        key = description.lower().replace(' ', '_')
+        data_file = output_dir / f"{subject_name}_patch{patch_number}_face{face_index}_{key}.csv"
+
+        if data_file.exists():
+            # Prefer "Posterior border of soft palate" if it exists
+            if 'soft palate' in description.lower() or 'palate' in description.lower():
+                reference_data = pd.read_csv(data_file)
+                reference_name = description
+                print(f"Using '{description}' as reference for key time points")
+                break
+            # Otherwise keep the first valid location as fallback
+            elif reference_data is None:
+                reference_data = pd.read_csv(data_file)
+                reference_name = description
+
+    if reference_data is not None and reference_name is not None:
+        print(f"Loaded reference data from '{reference_name}' for key time point analysis")
+    else:
+        print(f"Warning: No reference data found for key time point analysis")
     
     # Initialize variables to store key time points
     key_time_points = {
@@ -4297,11 +4897,11 @@ def main(overwrite_existing: bool = False,
         'exhalation_max_pressure': None
     }
     
-    # Find time point during inhalation with maximum negative AdotN at the posterior border of the soft palate
-    if soft_palate_data is not None and inhale_exhale_transition is not None:
+    # Find time point during inhalation with maximum negative AdotN at the reference location
+    if reference_data is not None and inhale_exhale_transition is not None:
         # Calculate AdotN from VdotN
-        times = soft_palate_data['Time (s)'].values
-        vdotn = soft_palate_data['VdotN'].values * 1000  # Convert from m/s to mm/s
+        times = reference_data['Time (s)'].values
+        vdotn = reference_data['VdotN'].values * 1000  # Convert from m/s to mm/s
         
         # Calculate acceleration using forward difference
         dt = np.diff(times)
@@ -4525,7 +5125,10 @@ def main(overwrite_existing: bool = False,
             if data_file.exists():
                 print(f"\nCreating metrics vs time plot for {description} (single point)")
                 df = pd.read_csv(data_file)
-                create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, metrics_vs_time_pdf)
+                # Generate both original and normalized time plots
+                create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, metrics_vs_time_pdf, use_normalized_time=False, flow_profile_path=flow_profile_path)
+                if 'Time_normalized (s)' in df.columns:
+                    create_metrics_vs_time_plot(df, subject_name, description, patch_number, face_index, metrics_vs_time_pdf, use_normalized_time=True, flow_profile_path=flow_profile_path)
             else:
                 print(f"Warning: No single point data file found for {description}")
             
@@ -4544,7 +5147,10 @@ def main(overwrite_existing: bool = False,
                     if patch_data_file.exists():
                         print(f"Creating metrics vs time plot for {patch_description}")
                         df = pd.read_csv(patch_data_file)
-                        create_metrics_vs_time_plot(df, subject_name, patch_description, patch_number, face_index, metrics_vs_time_pdf)
+                        # Generate both original and normalized time plots
+                        create_metrics_vs_time_plot(df, subject_name, patch_description, patch_number, face_index, metrics_vs_time_pdf, use_normalized_time=False, flow_profile_path=flow_profile_path)
+                        if 'Time_normalized (s)' in df.columns:
+                            create_metrics_vs_time_plot(df, subject_name, patch_description, patch_number, face_index, metrics_vs_time_pdf, use_normalized_time=True, flow_profile_path=flow_profile_path)
                     else:
                         print(f"Warning: No patch data file found for {patch_description}")
     
@@ -4592,50 +5198,48 @@ def main(overwrite_existing: bool = False,
         # Load data for all points to create the symmetric comparison panel
         print("\nGenerating symmetric comparison panel...")
         dfs = {}
-        location_map = {
-            'Posterior border of soft palate': 'posterior_border_of_soft_palate',
-            'Superior border of epiglottis': 'superior_border_of_epiglottis',
-            'Back of tongue': 'back_of_tongue',
-            'Anterior vocal fold': 'anterior_vocal_fold'
-        }
-        
+        locations_for_panel = []  # Dynamic list of locations from JSON
+
         for location in tracking_locations:
             patch_number = location['patch_number']
             face_index = location['face_indices'][0]
             description = location['description']
-            
-            # Skip anterior vocal fold for this plot
-            if description == 'Anterior vocal fold':
-                continue
-                
+
+            # Create a key from the description (lowercase with underscores)
+            key = description.lower().replace(' ', '_')
+
             # Load trajectory data
-            data_file = output_dir / f"{subject_name}_patch{patch_number}_face{face_index}_{description.lower().replace(' ', '_')}.csv"
-            
+            data_file = output_dir / f"{subject_name}_patch{patch_number}_face{face_index}_{key}.csv"
+
             if not data_file.exists():
                 print(f"Warning: No data file found for {description}")
                 continue
-                
+
             df = pd.read_csv(data_file)
-            dfs[location_map[description]] = df
-        
-        # Create symmetric comparison panel if we have all the required data
-        if len(dfs) == 3:
-            print(f"Creating symmetric comparison panels for {subject_name}...")
+            dfs[key] = df
+            locations_for_panel.append({'key': key, 'description': description})
+
+        # Create symmetric comparison panel if we have data
+        if len(dfs) >= 1:
+            print(f"Creating symmetric comparison panels for {subject_name} with {len(locations_for_panel)} locations...")
             # 1. Clean version (no markers)
-            create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir)
-            
+            create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+
             # 2. Detailed version (with zero-crossing markers)
-            create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir)
-            
+            create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+
             # 3. Smoothed version (with moving average)
-            create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir)
-            
-            # 4. Smoothed version with zero-crossing markers
-            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir)
-            
+            create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+
+            # 4. Smoothed version with zero-crossing markers (normalized time - starts at 0)
+            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, use_original_time=False)
+
+            # 5. Smoothed version with zero-crossing markers (original time - for traceability)
+            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True)
+
             print(f"Symmetric comparison panels completed.")
             
-            # 5. CFD Analysis 3x3 panels (new)
+            # 6. CFD Analysis 3x3 panels (new)
             if CFD_ANALYSIS_AVAILABLE:
                 print(f"Creating CFD Analysis 3x3 panels for {subject_name}...")
                 
@@ -4700,8 +5304,8 @@ def main(overwrite_existing: bool = False,
                         visualize_func = None
             
             if visualize_func is not None:
-                # Use consistent timestep detection logic
-                visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name)
+                # Use consistent timestep detection logic (pass flow_profile_path for consistency)
+                visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
                 
                 # Set patch radii if not provided
                 if patch_radii is None:
@@ -4764,28 +5368,45 @@ if __name__ == '__main__':
 This pipeline processes CFD airway data to track anatomical points and analyze
 pressure, velocity, and acceleration relationships during breathing cycles.
 
+═══════════════════════════════════════════════════════════════════════════════
+TWO-PHASE WORKFLOW (RECOMMENDED FOR NEW SUBJECTS)
+═══════════════════════════════════════════════════════════════════════════════
+
+Phase 1: PATCH SELECTION - Convert CSV to HDF5 and create interactive HTML
+   python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+
+   → Converts raw CSV files to HDF5 format (85% size reduction)
+   → Detects breathing cycle from flow profile
+   → Creates interactive HTML for manual patch/face selection
+   → Generates template tracking locations JSON in {SUBJECT}_results/
+
+   After Phase 1: Open the interactive HTML and update the tracking locations JSON
+   with correct patch_number and face_indices values for your anatomical landmarks.
+
+Phase 2: PLOTTING - Generate all analysis and plots
+   python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+
+   → Uses existing HDF5 file (skips CSV processing)
+   → Loads tracking locations from results folder
+   → Generates all analysis, tracking, and visualization outputs
+   → Creates both normalized and original time PDFs for traceability
+
+═══════════════════════════════════════════════════════════════════════════════
+
 DEMO USAGE SCENARIOS:
 
-1. 🚀 COMPLETE ANALYSIS FROM SCRATCH:
+1. 🚀 COMPLETE ANALYSIS FROM SCRATCH (Legacy - requires pre-configured tracking):
    python src/main.py --subject OSAMRI007
-   
+
    → Processes all data, generates PDFs, creates interactive visualizations
    → Outputs: CSV data, PDF reports, PNG figures, HTML visualizations
    → Time: ~5-10 minutes for full analysis
 
 2. 🔄 FORCE COMPLETE RERUN (overwrite existing data):
    python src/main.py --subject OSAMRI007 --forcererun
-   
-3. 📁 CUSTOM DATA DIRECTORY:
-   python src/main.py --subject OSAMRI007 --datadir /path/to/cfd/data
-   
-   → Process data from a different directory (useful for server deployments)
-   → All file paths will be relative to the specified data directory
-   → Outputs will be created in the data directory
-   
+
    → Reprocesses everything even if files exist
    → Use when you want fresh analysis or changed parameters
-   → Subject ID is required (no auto-detection with --forcererun)
 
 3. 🎨 HIGHLIGHT PATCH REGIONS:
    python src/main.py --subject OSAMRI007 --highlight-patches --patch-timestep 100
@@ -4839,27 +5460,34 @@ REQUIRED FILES:
 - {SUBJECT}_tracking_locations.json (anatomical landmark definitions)
 
 OUTPUTS STRUCTURE:
-{SUBJECT}_results/
-├── tracked_points/    (CSV trajectory data)
-├── figures/          (PNG images)
-├── reports/          (PDF analysis reports)
-├── interactive/      (HTML visualizations)
-└── {SUBJECT}_key_time_points.json (breathing cycle analysis)
+{SUBJECT}_results/                              (self-contained results folder)
+├── {SUBJECT}_cfd_data.h5                       (HDF5 cache - 85% size reduction)
+├── {SUBJECT}_tracking_locations.json           (editable tracking locations)
+├── {SUBJECT}_key_time_points.json              (breathing cycle analysis)
+├── tracked_points/                             (CSV trajectory data)
+├── figures/                                    (PNG images)
+├── reports/                                    (PDF analysis reports)
+└── interactive/                                (HTML visualizations)
 
 ENVIRONMENT:
-Recommended: conda activate tf210_clone
+Setup: conda env create -f environment.yml && conda activate cfd-analysis
 '''
 
     parser = argparse.ArgumentParser(
         description=description,
         formatter_class=CustomHelpFormatter,
         epilog='''
-Examples:
-  python src/main.py --subject OSAMRI007                    # Full analysis
-  python src/main.py --subject OSAMRI007 --rawdir qDNS_xyz_tables # Use custom raw data directory
-  python src/main.py --highlight-patches --patch-timestep 100  # Highlight patch regions
-  python src/main.py --raw-surface --surface-timestep 50   # Raw surface for point selection
+Examples (Two-Phase Workflow - Recommended):
+  # Phase 1: Create HDF5 and interactive HTML for point selection
+  python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+
+  # Phase 2: Generate all analysis and plots (after updating tracking JSON)
+  python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+
+Examples (Other Commands):
+  python src/main.py --subject OSAMRI007                    # Full analysis (legacy)
   python src/main.py --subject OSAMRI007 --forcererun      # Force complete rerun
+  python src/main.py --highlight-patches --patch-timestep 100  # Highlight patch regions
   python src/main.py --listsubjects                         # Show available data
         '''
     )
@@ -4894,8 +5522,63 @@ Examples:
                       help='Time step for interactive selector (default: 100 = 0.1s)')
     parser.add_argument('--smoothing-window', type=int, default=20,
                       help='Smoothing window size for plot data (default: 20 time steps)')
+
+    # Two-phase pipeline arguments
+    parser.add_argument('--patch-selection', action='store_true',
+                      help='Phase 1: Create interactive HTML and template JSON for patch/face selection (no plotting)')
+    parser.add_argument('--plotting', action='store_true',
+                      help='Phase 2: Generate analysis and plots using existing HDF5 and tracking JSON')
+
+    # Required input files for production workflow
+    parser.add_argument('--flow-profile', type=str,
+                      help='Path to breathing flow profile CSV file (required for --patch-selection and --plotting modes)')
+
+    # Remesh handling arguments
+    parser.add_argument('--has-remesh', action='store_true',
+                      help='Indicate that CFD simulation has mesh remeshing during the run')
+    parser.add_argument('--remesh-before', type=str,
+                      help='CSV filename of last timestep BEFORE remesh (for coordinate mapping)')
+    parser.add_argument('--remesh-after', type=str,
+                      help='CSV filename of first timestep AFTER remesh (for coordinate mapping)')
+    parser.add_argument('--point-picker', action='store_true',
+                      help='Launch PyVista-based interactive point picker (fast VTK picking for large datasets)')
+    parser.add_argument('--picker-timestep', type=int,
+                      help='Specific timestep for point picker (optional, will prompt if not provided)')
+
     args = parser.parse_args()
-    
+
+    # Validate --flow-profile requirement for production modes
+    if getattr(args, 'patch_selection', False):
+        # Phase 1 always requires flow profile
+        if not args.flow_profile:
+            print("❌ ERROR: --flow-profile is required for --patch-selection mode")
+            print("   Example: python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile.csv")
+            sys.exit(1)
+        # Validate flow profile file exists
+        flow_profile_path = Path(args.flow_profile)
+        if not flow_profile_path.exists():
+            print(f"❌ ERROR: Flow profile file not found: {args.flow_profile}")
+            sys.exit(1)
+        print(f"✅ Using flow profile: {args.flow_profile}")
+    elif getattr(args, 'plotting', False):
+        # Phase 2: flow profile can come from HDF5 or command line
+        if args.flow_profile:
+            flow_profile_path = Path(args.flow_profile)
+            if not flow_profile_path.exists():
+                print(f"❌ ERROR: Flow profile file not found: {args.flow_profile}")
+                sys.exit(1)
+            print(f"✅ Using flow profile: {args.flow_profile}")
+        else:
+            # Check if HDF5 has embedded flow profile
+            from data_processing.trajectory import has_flow_profile
+            hdf5_file = Path(f"{args.subject}_results/{args.subject}_cfd_data.h5")
+            if hdf5_file.exists() and has_flow_profile(str(hdf5_file)):
+                print(f"✅ Flow profile will be extracted from HDF5")
+            else:
+                print("❌ ERROR: --flow-profile is required (not found in HDF5)")
+                print("   Example: python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile.csv")
+                sys.exit(1)
+
     # Handle list subjects command
     if args.listsubjects:
         subjects = detect_available_subjects()
@@ -4912,13 +5595,42 @@ Examples:
         else:
             print("❌ No subjects found (no folders matching *_xyz_tables pattern)")
         sys.exit(0)
+
+    # Handle point picker mode
+    if getattr(args, 'point_picker', False):
+        if not args.subject:
+            print("❌ ERROR: --subject is required for --point-picker mode")
+            sys.exit(1)
+
+        results_dir = Path(f"{args.subject}_results")
+
+        if not results_dir.exists():
+            print(f"❌ ERROR: Results directory not found: {results_dir}")
+            print("   Run --patch-selection first to create HDF5 cache")
+            sys.exit(1)
+
+        h5_file = results_dir / f"{args.subject}_cfd_data.h5"
+        if not h5_file.exists():
+            print(f"❌ ERROR: HDF5 cache not found: {h5_file}")
+            print("   Run --patch-selection first to create HDF5 cache")
+            sys.exit(1)
+
+        # Try Qt GUI first, fall back to simple picker
+        try:
+            from visualization.point_picker_gui import run_point_picker_gui
+            run_point_picker_gui(args.subject, args.picker_timestep, results_dir)
+        except ImportError as e:
+            print(f"⚠️ Qt GUI not available ({e}), using simple picker")
+            from visualization.point_picker import run_point_picker
+            run_point_picker(args.subject, args.picker_timestep, results_dir)
+        sys.exit(0)
     
     # Convert patch radii from mm to meters if provided
     patch_radii = None
     if args.patchradii:
         patch_radii = [r / 1000.0 for r in args.patchradii]  # Convert mm to m
     
-    main(overwrite_existing=args.forcererun, 
+    main(overwrite_existing=args.forcererun,
          enable_patch_analysis=not args.disablepatchanalysis,
          patch_radii=patch_radii,
          normal_angle_threshold=args.normalangle,
@@ -4931,4 +5643,10 @@ Examples:
          surface_timestep=args.surface_timestep,
          interactive_selector=getattr(args, 'interactive_selector', False),
          selector_timestep=args.selector_timestep,
-         smoothing_window=getattr(args, 'smoothing_window', 20)) 
+         smoothing_window=getattr(args, 'smoothing_window', 20),
+         patch_selection_mode=getattr(args, 'patch_selection', False),
+         plotting_mode=getattr(args, 'plotting', False),
+         has_remesh=getattr(args, 'has_remesh', False),
+         remesh_before=getattr(args, 'remesh_before', None),
+         remesh_after=getattr(args, 'remesh_after', None),
+         flow_profile_path=getattr(args, 'flow_profile', None)) 

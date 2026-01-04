@@ -289,36 +289,40 @@ def plot_3d_interactive_all_patches(data_source, tracking_points, subject_name: 
     )
     
     # Save HTML file in organized directory structure
+    # Include time point in filename for clarity (first file in breathing cycle)
+    if time_point is not None:
+        time_suffix = f"_first_breathing_cycle_t{time_point}ms"
+    else:
+        time_suffix = ""
+
     if output_dir:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        html_filename = output_dir / f'{subject_name}_surface_patches_interactive.html'
+        html_filename = output_dir / f'{subject_name}_surface_patches_interactive{time_suffix}.html'
     else:
-        html_filename = f'{subject_name}_surface_patches_interactive.html'
+        html_filename = f'{subject_name}_surface_patches_interactive{time_suffix}.html'
     
-    # Add simple JavaScript for 3D navigation info
+    # Add JavaScript for navigation help panel (hover shows patch/face info via Plotly tooltip)
     custom_js = f"""
     <script>
     document.addEventListener('DOMContentLoaded', function() {{
-        var plotDiv = document.getElementsByClassName('plotly-graph-div')[0];
-        
         console.log('🎯 Surface patches 3D visualization loaded');
-        console.log('📊 Plot div found:', plotDiv ? 'Yes' : 'No');
-        
+
         // Add navigation help panel
         var helpDiv = document.createElement('div');
         helpDiv.id = 'navigation-help';
         helpDiv.innerHTML = `
-            <h4 style="margin: 0 0 8px 0; color: #2c3e50;">🎯 3D Navigation ({data_source_type} Data)</h4>
+            <h4 style="margin: 0 0 8px 0; color: #2c3e50;">🎯 3D Navigation</h4>
             <div style="font-size: 12px; line-height: 1.4;">
                 <div style="margin-bottom: 6px;">
                     <strong>🔄 Rotate:</strong> Click and drag<br>
                     <strong>🔍 Zoom:</strong> Scroll wheel<br>
                     <strong>📱 Pan:</strong> Shift + Click and drag<br>
-                    <strong>ℹ️ Info:</strong> Hover over points
+                    <strong>👆 Hover:</strong> Shows Patch & Face Index
                 </div>
                 <div style="color: #27ae60; font-size: 11px; font-style: italic;">
-                    Note: Point selection not available in 3D view
+                    Use PyVista picker for fast point selection:<br>
+                    python src/main.py --point-picker
                 </div>
             </div>
         `;
@@ -337,8 +341,8 @@ def plot_3d_interactive_all_patches(data_source, tracking_points, subject_name: 
             max-width: 280px;
         `;
         document.body.appendChild(helpDiv);
-        
-        console.log('✅ Enhanced 3D selection system initialized');
+
+        console.log('✅ Navigation help initialized');
     }});
     </script>
     """

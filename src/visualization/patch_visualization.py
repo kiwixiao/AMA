@@ -378,19 +378,20 @@ def visualize_patch_regions(subject_name: str,
         plot_bgcolor='white'    # Plot area background
     )
     
-    # Save the visualization
+    # Save the visualization (round timestep for clean filename)
+    time_step_int = int(round(time_step))
     if output_dir:
-        output_path = Path(output_dir) / f'{subject_name}_patch_regions_t{time_step}.html'
+        output_path = Path(output_dir) / f'{subject_name}_patch_regions_t{time_step_int}ms.html'
     else:
-        output_path = f'{subject_name}_patch_regions_t{time_step}.html'
-    
+        output_path = f'{subject_name}_patch_regions_t{time_step_int}ms.html'
+
     fig.write_html(output_path)
     print(f"\n✅ Patch regions visualization saved as: {output_path}")
-    
+
     # Also save to results directory if it exists
     results_interactive_dir = Path(f'{subject_name}_results/interactive')
     if results_interactive_dir.exists():
-        results_output_path = results_interactive_dir / f'{subject_name}_patch_regions_t{time_step}.html'
+        results_output_path = results_interactive_dir / f'{subject_name}_patch_regions_t{time_step_int}ms.html'
         fig.write_html(results_output_path)
         print(f"📁 Also saved to: {results_output_path}")
     

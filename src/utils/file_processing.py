@@ -90,47 +90,31 @@ def find_flow_profile_file(subject_name: str) -> Optional[Path]:
 
 def find_tracking_locations_file(subject_name: str) -> Optional[Path]:
     """
-    Find the appropriate tracking locations file for a subject, with smart fallback.
-    
+    Find the appropriate tracking locations file for a subject.
+
+    PRODUCTION MODE: Only search in results folder for self-contained subject data.
+
     Search order:
-    1. Exact match: {subject_name}_tracking_locations.json
-    2. Base subject: {base_subject}_tracking_locations.json
-    3. Generic: tracking_locations.json
-    
+    1. {subject_name}_results/{subject_name}_tracking_locations.json
+
     Args:
         subject_name: Subject name (potentially with mesh variant)
-        
+
     Returns:
         Path to tracking locations file, or None if not found
     """
-    base_subject = extract_base_subject(subject_name)
-    
-    # Define search candidates in priority order
-    candidates = [
-        f"{subject_name}_tracking_locations.json",
-        f"{base_subject}_tracking_locations.json",
-        "tracking_locations.json",
-    ]
-    
+    # PRODUCTION MODE: Only check results folder
+    results_file = Path(f"{subject_name}_results/{subject_name}_tracking_locations.json")
+
     print(f"🔍 Searching for tracking locations for subject: {subject_name}")
-    if base_subject != subject_name:
-        print(f"   Base subject detected: {base_subject}")
-    
-    for candidate in candidates:
-        file_path = Path(candidate)
-        if file_path.exists():
-            if candidate.startswith(subject_name):
-                print(f"✅ Found exact match: {candidate}")
-            elif candidate.startswith(base_subject):
-                print(f"✅ Found base subject match: {candidate}")
-                print(f"   Using {base_subject} tracking locations for {subject_name}")
-            else:
-                print(f"✅ Found generic match: {candidate}")
-                print(f"   Using generic tracking locations for {subject_name}")
-            return file_path
-    
+
+    if results_file.exists():
+        print(f"✅ Found in results folder: {results_file}")
+        return results_file
+
     print(f"❌ No tracking locations found for {subject_name}")
-    print(f"   Searched for: {candidates}")
+    print(f"   Expected location: {results_file}")
+    print(f"   Run --patch-selection first to create template JSON")
     return None
 
 def create_variant_tracking_locations(subject_name: str, force_create: bool = False) -> bool:
@@ -253,14 +237,15 @@ def load_tracking_locations(subject_name: str = None, config_file: str = None) -
         file_to_use = config_file
         file_path = Path(file_to_use)
     elif subject_name is not None:
-        # Check for exact subject-specific file first
-        exact_file = Path(f"{subject_name}_tracking_locations.json")
+        # PRODUCTION MODE: Only check results folder for self-contained subject data
+        results_file = Path(f"{subject_name}_results/{subject_name}_tracking_locations.json")
         base_subject = extract_base_subject(subject_name)
-        
-        if exact_file.exists():
-            file_path = exact_file
+
+        if results_file.exists():
+            # Load from results folder (production-ready, self-contained)
+            file_path = results_file
             file_to_use = str(file_path)
-            print(f"Loaded tracking locations from: {file_to_use}")
+            print(f"✅ Loaded tracking locations from: {file_to_use}")
         else:
             # Use smart resolution to find appropriate file
             file_path = find_tracking_locations_file(subject_name)
@@ -303,24 +288,770 @@ def load_tracking_locations(subject_name: str = None, config_file: str = None) -
         print(f"Invalid configuration format in {file_to_use}!")
         return {'locations': [], 'combinations': []}
 
-def find_breathing_cycle_bounds(subject_name: str) -> Tuple[float, float]:
+
+def create_template_tracking_locations(subject_name: str, output_dir: Path = None,
+                                       remesh_info: dict = None) -> Path:
+    """
+    Create a template tracking locations JSON file for fresh cases.
+
+    This template provides placeholder values that the user must update
+    after using the interactive HTML visualization to identify patch/face indices.
+
+    Args:
+        subject_name: Subject name (e.g., "OSAMRI007")
+        output_dir: Directory to save the template (default: {subject}_results/)
+        remesh_info: Optional dictionary with remesh configuration from Phase 1
+
+    Returns:
+        Path to the created template file
+    """
+    if output_dir is None:
+        output_dir = Path(f"{subject_name}_results")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    template_file = output_dir / f"{subject_name}_tracking_locations.json"
+
+    # Check if file already exists
+    if template_file.exists():
+        print(f"📋 Template tracking locations file already exists: {template_file}")
+        return template_file
+
+    # Determine if remesh is enabled
+    has_remesh = remesh_info and remesh_info.get('has_remesh', False)
+
+    # Create location template - always include all fields for consistency
+    def create_location_template(num):
+        location = {
+            "description": f"Location {num} - UPDATE THIS DESCRIPTION",
+            "patch_number": 0,
+            "face_indices": [0],
+            "coordinates": [0.0, 0.0, 0.0],
+            "post_remesh_list": []  # Empty if no remesh, populated in Phase 2 if remesh
+        }
+        return location
+
+    # Create template structure with placeholders
+    template = {
+        "locations": [
+            create_location_template(1),
+            create_location_template(2),
+            create_location_template(3)
+        ],
+        "combinations": [],
+        "_instructions": {
+            "step1": "Open the interactive HTML visualization in your browser",
+            "step2": "Hover over points to see Patch Number and Face Index",
+            "step3": "Update each location's patch_number, face_indices, and coordinates",
+            "step4": "Update the description to something meaningful (e.g., 'Posterior soft palate')",
+            "step5": "Add or remove locations as needed",
+            "step6": "Run the pipeline again with --plotting to generate analysis"
+        }
+    }
+
+    # Add remesh_info if available
+    if has_remesh:
+        template["remesh_info"] = {
+            "has_remesh": True,
+            "remesh_before_file": remesh_info.get('remesh_before_file'),
+            "remesh_after_file": remesh_info.get('remesh_after_file'),
+            "remesh_timestep_ms": remesh_info.get('remesh_timestep_ms'),
+            "_note": "post_remesh fields will be auto-populated when you run --plotting"
+        }
+        # Include remesh_events list if available (for multiple remesh events)
+        if remesh_info.get('remesh_events'):
+            template["remesh_info"]["remesh_events"] = remesh_info['remesh_events']
+        template["_instructions"]["step7"] = "For remesh cases: post_remesh mappings are auto-calculated from coordinates"
+    else:
+        template["remesh_info"] = {
+            "has_remesh": False
+        }
+
+    # Write template to file
+    with open(template_file, 'w') as f:
+        json.dump(template, f, indent=2)
+
+    print(f"📋 Created template tracking locations file: {template_file}")
+    print("   ⚠️  UPDATE THIS FILE with correct patch/face values from interactive HTML")
+    if has_remesh:
+        print("   🔄 Remesh enabled: post_remesh fields will be auto-calculated in Phase 2")
+
+    return template_file
+
+
+def find_closest_point_after_remesh(target_coords: Tuple[float, float, float],
+                                    csv_file_path: Path,
+                                    max_distance: float = 0.005) -> Optional[Dict]:
+    """
+    Find the closest point in a CSV file to the target coordinates.
+
+    This is used for remesh handling - when the CFD mesh changes during simulation,
+    the patch_number and face_index change but the physical location stays the same.
+    We use coordinates to find the corresponding point in the new mesh.
+
+    Args:
+        target_coords: (x, y, z) coordinates to match
+        csv_file_path: Path to the CSV file to search
+        max_distance: Maximum allowed distance (meters) for a valid match (default: 5mm)
+
+    Returns:
+        Dictionary with matched point info, or None if no match found
+        {
+            'patch_number': int,
+            'face_index': int,
+            'coordinates': [x, y, z],
+            'distance': float  # distance from target
+        }
+    """
+    import pandas as pd
+
+    try:
+        df = pd.read_csv(csv_file_path)
+    except Exception as e:
+        print(f"❌ Error reading CSV file {csv_file_path}: {e}")
+        return None
+
+    # Check required columns
+    required_cols = ['X (m)', 'Y (m)', 'Z (m)', 'Face Index']
+    if not all(col in df.columns for col in required_cols):
+        print(f"❌ CSV file missing required columns: {required_cols}")
+        return None
+
+    # Calculate Patch Number if not present
+    if 'Patch Number' not in df.columns:
+        # Compute patch numbers based on Face Index resets
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        for face_idx in df['Face Index']:
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        df['Patch Number'] = patch_numbers
+
+    # Calculate distances from target coordinates
+    target_x, target_y, target_z = target_coords
+    distances = np.sqrt(
+        (df['X (m)'] - target_x)**2 +
+        (df['Y (m)'] - target_y)**2 +
+        (df['Z (m)'] - target_z)**2
+    )
+
+    # Find minimum distance
+    min_idx = distances.idxmin()
+    min_distance = distances[min_idx]
+
+    if min_distance > max_distance:
+        print(f"⚠️  Closest point is {min_distance*1000:.2f}mm away (max: {max_distance*1000:.2f}mm)")
+        return None
+
+    # Return matched point info
+    matched_row = df.loc[min_idx]
+    return {
+        'patch_number': int(matched_row['Patch Number']),
+        'face_index': int(matched_row['Face Index']),
+        'coordinates': [
+            float(matched_row['X (m)']),
+            float(matched_row['Y (m)']),
+            float(matched_row['Z (m)'])
+        ],
+        'distance': float(min_distance)
+    }
+
+
+def update_tracking_locations_for_remesh(tracking_config: Dict,
+                                         before_csv: Path,
+                                         after_csv: Path,
+                                         max_distance: float = 0.005) -> Dict:
+    """
+    Update tracking locations for a remeshed CFD simulation.
+
+    This function:
+    1. Gets coordinates from the tracking location (or validates against before-remesh data)
+    2. Finds the closest points in the first frame after remesh
+    3. PRESERVES original patch_number and face_indices
+    4. ADDS post_remesh field with new patch/face for after-remesh timesteps
+
+    The original patch/face is used for pre-remesh timesteps.
+    The post_remesh patch/face is used for post-remesh timesteps.
+
+    Args:
+        tracking_config: Current tracking locations config
+        before_csv: Path to CSV file just before remesh
+        after_csv: Path to CSV file just after remesh
+        max_distance: Maximum allowed distance for coordinate matching
+
+    Returns:
+        Updated tracking config with post_remesh mappings (original preserved)
+    """
+    import pandas as pd
+
+    print(f"\n🔄 Calculating post-remesh mappings...")
+    print(f"   Before remesh: {before_csv}")
+    print(f"   After remesh: {after_csv}")
+    print(f"   NOTE: Original patch/face values will be PRESERVED")
+
+    # Load before-remesh data to validate coordinates
+    try:
+        before_df = pd.read_csv(before_csv)
+    except Exception as e:
+        print(f"❌ Error reading before-remesh CSV: {e}")
+        return tracking_config
+
+    # Calculate Patch Number for before_df if needed
+    if 'Patch Number' not in before_df.columns:
+        patch_numbers = []
+        current_patch = 1
+        prev_face_idx = -1
+        for face_idx in before_df['Face Index']:
+            if face_idx == 0 and prev_face_idx > 0:
+                current_patch += 1
+            patch_numbers.append(current_patch)
+            prev_face_idx = face_idx
+        before_df['Patch Number'] = patch_numbers
+
+    updated_config = tracking_config.copy()
+
+    # Update remesh_info with file paths (preserve existing info if present)
+    if 'remesh_info' not in updated_config:
+        updated_config['remesh_info'] = {}
+    updated_config['remesh_info']['has_remesh'] = True
+    updated_config['remesh_info']['before_file'] = str(Path(before_csv).name)
+    updated_config['remesh_info']['after_file'] = str(Path(after_csv).name)
+    updated_config['remesh_info']['mappings'] = []
+
+    success_count = 0
+    for i, location in enumerate(updated_config['locations']):
+        patch_num = location['patch_number']
+        face_idx = location['face_indices'][0]
+        description = location.get('description', f'Location {i+1}')
+
+        print(f"\n   Processing: {description}")
+        print(f"   Original (pre-remesh): Patch {patch_num}, Face {face_idx}")
+
+        # Get coordinates - prefer stored coordinates, validate against before-remesh data
+        coords = None
+        if 'coordinates' in location and location['coordinates'] != [0.0, 0.0, 0.0]:
+            coords = tuple(location['coordinates'])
+            print(f"   Using stored coordinates: ({coords[0]:.6f}, {coords[1]:.6f}, {coords[2]:.6f})")
+        else:
+            # Try to get from before-remesh data
+            mask = (before_df['Patch Number'] == patch_num) & (before_df['Face Index'] == face_idx)
+            matched_rows = before_df[mask]
+            if len(matched_rows) > 0:
+                row = matched_rows.iloc[0]
+                coords = (row['X (m)'], row['Y (m)'], row['Z (m)'])
+                # Update stored coordinates
+                updated_config['locations'][i]['coordinates'] = list(coords)
+                print(f"   Extracted coordinates: ({coords[0]:.6f}, {coords[1]:.6f}, {coords[2]:.6f})")
+            else:
+                print(f"   ❌ No coordinates available, skipping")
+                updated_config['locations'][i]['post_remesh'] = None
+                continue
+
+        # Find closest point in after-remesh data
+        match = find_closest_point_after_remesh(coords, after_csv, max_distance)
+
+        if match is None:
+            print(f"   ❌ No matching point found after remesh (within {max_distance*1000:.1f}mm)")
+            updated_config['locations'][i]['post_remesh'] = None
+            continue
+
+        print(f"   Post-remesh: Patch {match['patch_number']}, Face {match['face_index']}")
+        print(f"   Match distance: {match['distance']*1000:.3f}mm")
+
+        # ADD post_remesh field (DO NOT overwrite original patch_number/face_indices)
+        updated_config['locations'][i]['post_remesh'] = {
+            'patch_number': match['patch_number'],
+            'face_index': match['face_index'],
+            'coordinates': match['coordinates'],
+            'distance_mm': match['distance'] * 1000
+        }
+
+        # Store mapping info for reference
+        updated_config['remesh_info']['mappings'].append({
+            'description': description,
+            'pre_remesh': {'patch_number': patch_num, 'face_index': face_idx},
+            'post_remesh': {'patch_number': match['patch_number'], 'face_index': match['face_index']},
+            'distance_mm': match['distance'] * 1000
+        })
+        success_count += 1
+
+    print(f"\n✅ Remesh mapping complete:")
+    print(f"   {success_count}/{len(updated_config['locations'])} locations mapped")
+    print(f"   Original patch/face values PRESERVED for pre-remesh timesteps")
+    print(f"   post_remesh values added for post-remesh timesteps")
+    return updated_config
+
+
+def update_tracking_locations_for_multiple_remesh(tracking_config: Dict,
+                                                   remesh_events: list,
+                                                   xyz_tables_dir: Path,
+                                                   max_distance: float = 0.005) -> Dict:
+    """
+    Update tracking locations for multiple remesh events.
+
+    For each remesh event, calculates the post-remesh mapping using the coordinates
+    from the before-remesh timestep. Builds a post_remesh_list with one mapping
+    per remesh event.
+
+    Args:
+        tracking_config: Current tracking locations config
+        remesh_events: List of remesh events, each with {before_file, after_file, timestep_ms}
+        xyz_tables_dir: Path to directory containing CSV files
+        max_distance: Maximum allowed distance for coordinate matching
+
+    Returns:
+        Updated tracking config with post_remesh_list for each location
+    """
+    import pandas as pd
+
+    if not remesh_events:
+        return tracking_config
+
+    print(f"\n🔄 Calculating post-remesh mappings for {len(remesh_events)} remesh event(s)...")
+
+    updated_config = tracking_config.copy()
+
+    # Initialize post_remesh_list for each location
+    for i in range(len(updated_config['locations'])):
+        updated_config['locations'][i]['post_remesh_list'] = []
+
+    # Update remesh_info
+    if 'remesh_info' not in updated_config:
+        updated_config['remesh_info'] = {}
+    updated_config['remesh_info']['has_remesh'] = True
+    updated_config['remesh_info']['remesh_events'] = remesh_events
+    updated_config['remesh_info']['mappings'] = []
+
+    # Process each remesh event
+    for event_idx, event in enumerate(remesh_events):
+        before_file = event['before_file']
+        after_file = event['after_file']
+        timestep_ms = event['timestep_ms']
+
+        print(f"\n   {'─'*40}")
+        print(f"   Remesh Event #{event_idx + 1}: boundary at {timestep_ms:.1f}ms")
+        print(f"   Before: {before_file}")
+        print(f"   After:  {after_file}")
+
+        # Find the CSV files
+        before_csv = xyz_tables_dir / before_file
+        after_csv = xyz_tables_dir / after_file
+
+        if not before_csv.exists():
+            print(f"   ❌ Before file not found: {before_csv}")
+            continue
+        if not after_csv.exists():
+            print(f"   ❌ After file not found: {after_csv}")
+            continue
+
+        # For first event, use original coordinates
+        # For subsequent events, use the previous post_remesh coordinates
+        for i, location in enumerate(updated_config['locations']):
+            description = location.get('description', f'Location {i+1}')
+
+            if event_idx == 0:
+                # First remesh: use original patch/face to get coordinates
+                patch_num = location['patch_number']
+                face_idx = location['face_indices'][0]
+                source = "original"
+
+                # Get coordinates
+                if 'coordinates' in location and location['coordinates'] != [0.0, 0.0, 0.0]:
+                    coords = tuple(location['coordinates'])
+                else:
+                    # Need to extract from before-remesh CSV
+                    try:
+                        before_df = pd.read_csv(before_csv)
+                        if 'Patch Number' not in before_df.columns:
+                            patch_numbers = []
+                            current_patch = 1
+                            prev_face_idx = -1
+                            for fidx in before_df['Face Index']:
+                                if fidx == 0 and prev_face_idx > 0:
+                                    current_patch += 1
+                                patch_numbers.append(current_patch)
+                                prev_face_idx = fidx
+                            before_df['Patch Number'] = patch_numbers
+
+                        mask = (before_df['Patch Number'] == patch_num) & (before_df['Face Index'] == face_idx)
+                        matched_rows = before_df[mask]
+                        if len(matched_rows) > 0:
+                            row = matched_rows.iloc[0]
+                            coords = (row['X (m)'], row['Y (m)'], row['Z (m)'])
+                            updated_config['locations'][i]['coordinates'] = list(coords)
+                        else:
+                            print(f"      {description}: ❌ No coordinates, skipping")
+                            continue
+                    except Exception as e:
+                        print(f"      {description}: ❌ Error reading coordinates: {e}")
+                        continue
+            else:
+                # Subsequent remesh: use previous post_remesh coordinates
+                prev_mapping = updated_config['locations'][i]['post_remesh_list'][-1] if updated_config['locations'][i]['post_remesh_list'] else None
+                if prev_mapping and 'coordinates' in prev_mapping:
+                    coords = tuple(prev_mapping['coordinates'])
+                    source = f"post_remesh_{event_idx}"
+                else:
+                    print(f"      {description}: ❌ No previous mapping, skipping")
+                    continue
+
+            # Find closest point in after-remesh data
+            match = find_closest_point_after_remesh(coords, after_csv, max_distance)
+
+            if match is None:
+                print(f"      {description}: ❌ No match within {max_distance*1000:.1f}mm")
+                updated_config['locations'][i]['post_remesh_list'].append(None)
+                continue
+
+            mapping = {
+                'event_index': event_idx,
+                'patch_number': match['patch_number'],
+                'face_index': match['face_index'],
+                'coordinates': match['coordinates'],
+                'distance_mm': match['distance'] * 1000
+            }
+            updated_config['locations'][i]['post_remesh_list'].append(mapping)
+
+            print(f"      {description}: Patch {match['patch_number']}, Face {match['face_index']} ({match['distance']*1000:.2f}mm)")
+
+    # Count successes
+    success_count = sum(1 for loc in updated_config['locations']
+                        if loc.get('post_remesh_list') and all(m is not None for m in loc['post_remesh_list']))
+
+    print(f"\n✅ Multi-remesh mapping complete:")
+    print(f"   {success_count}/{len(updated_config['locations'])} locations fully mapped")
+    print(f"   {len(remesh_events)} remesh event(s) processed")
+    return updated_config
+
+
+def ask_remesh_questions_interactive(xyz_files: list) -> dict:
+    """
+    Interactively ask user about remesh configuration during Phase 1.
+
+    This function:
+    1. Shows available CSV files
+    2. Asks if there's a remesh in this case
+    3. If yes, asks for before/after CSV filenames (with TAB completion)
+    4. Validates the files exist
+    5. Calculates remesh timestep boundary
+
+    Args:
+        xyz_files: List of CSV file paths (sorted chronologically)
+
+    Returns:
+        Dictionary with remesh info:
+        {
+            'has_remesh': bool,
+            'remesh_before_file': str or None,
+            'remesh_after_file': str or None,
+            'remesh_timestep_ms': float or None,
+            'pre_remesh_files': list,  # Files before remesh
+            'post_remesh_files': list  # Files after remesh
+        }
+    """
+    import re
+
+    def extract_timestep(filepath):
+        """Extract timestep in ms from CSV filename."""
+        filename = Path(filepath).name
+        # Try scientific notation first (e.g., 2.300000e+00)
+        match = re.search(r'table_([0-9.]+e[+-]?[0-9]+)\.csv', filename, re.IGNORECASE)
+        if match:
+            return float(match.group(1)) * 1000  # seconds to ms
+        # Try integer format (e.g., 2387)
+        match = re.search(r'table_(\d+)\.csv', filename)
+        if match:
+            return float(match.group(1))  # already in ms
+        return None
+
+    # Build a fast lookup: timestep number -> full filename
+    # e.g., "1000" -> "XYZ_Internal_Table_table_1000.csv"
+    timestep_to_filename = {}
+    for f in xyz_files:
+        name = Path(f).name
+        # Extract just the number part
+        match = re.search(r'table_(\d+)\.csv', name)
+        if match:
+            timestep_to_filename[match.group(1)] = name
+
+    # Cache for completions
+    completion_cache = {'text': None, 'matches': []}
+
+    def setup_tab_completion():
+        """Setup readline tab completion - supports both paths and timestep numbers."""
+        try:
+            import readline
+            import glob as glob_module
+
+            def completer(text, state):
+                # Use cache if same text
+                if completion_cache['text'] != text:
+                    completion_cache['text'] = text
+                    matches = []
+
+                    # Path completion: if contains '/' or starts with '.' or letter
+                    if '/' in text or text.startswith('.') or (text and text[0].isalpha()):
+                        # Use glob for path completion
+                        pattern = text + '*'
+                        glob_matches = glob_module.glob(pattern)
+                        # Add trailing slash for directories
+                        matches = [m + '/' if Path(m).is_dir() else m for m in glob_matches]
+                        matches = sorted(matches)[:20]  # Limit results
+
+                    # Numeric completion: timestep numbers
+                    elif text.isdigit() or text == '':
+                        matches = [ts for ts in timestep_to_filename.keys() if ts.startswith(text)]
+                        matches = sorted(matches, key=int)[:20]
+
+                    completion_cache['matches'] = matches
+
+                matches = completion_cache['matches']
+                if state < len(matches):
+                    return matches[state]
+                return None
+
+            readline.set_completer(completer)
+            readline.set_completer_delims(' \t\n')
+            readline.parse_and_bind('tab: complete')
+            return True
+        except ImportError:
+            return False
+
+    def restore_tab_completion():
+        """Restore default tab completion."""
+        try:
+            import readline
+            readline.set_completer(None)
+        except ImportError:
+            pass
+
+    result = {
+        'has_remesh': False,
+        'remesh_events': [],  # List of {before_file, after_file, timestep_ms}
+        # Backward compatibility (populated from first remesh event):
+        'remesh_before_file': None,
+        'remesh_after_file': None,
+        'remesh_timestep_ms': None,
+        'pre_remesh_files': xyz_files,
+        'post_remesh_files': []
+    }
+
+    print("\n" + "="*60)
+    print("🔄 REMESH CONFIGURATION")
+    print("="*60)
+
+    # Show file range
+    if xyz_files:
+        first_ts = extract_timestep(xyz_files[0])
+        last_ts = extract_timestep(xyz_files[-1])
+        print(f"📊 Found {len(xyz_files)} CSV files")
+        print(f"   Time range: {first_ts:.1f}ms - {last_ts:.1f}ms")
+        print(f"   First file: {Path(xyz_files[0]).name}")
+        print(f"   Last file: {Path(xyz_files[-1]).name}")
+
+    print("\n❓ Does this CFD simulation have mesh remeshing during the run?")
+    print("   (Remesh = mesh topology changes, causing patch/face indices to change)")
+
+    while True:
+        response = input("\n   Has remesh? [y/n]: ").strip().lower()
+        if response in ['y', 'yes']:
+            result['has_remesh'] = True
+            break
+        elif response in ['n', 'no']:
+            result['has_remesh'] = False
+            print("✅ No remesh - will use consistent patch/face indices throughout")
+            return result
+        else:
+            print("   Please enter 'y' or 'n'")
+
+    # Ask for before/after files with tab completion
+    print("\n📋 Please specify the remesh boundary files:")
+    print("   💡 TIP: Use TAB for auto-completion")
+
+    # Enable tab completion
+    tab_enabled = setup_tab_completion()
+    if tab_enabled:
+        print("   ✅ Tab completion enabled:")
+        print("      - Type number + TAB (e.g., '100' → timesteps)")
+        print("      - Type path + TAB (e.g., '2mm' → folders/files)")
+
+    def resolve_file_input(user_input):
+        """Resolve user input to a matching file. Accepts timestep number, filename, or full path."""
+        # First, try exact timestep match (e.g., "1000" -> "XYZ_Internal_Table_table_1000.csv")
+        if user_input in timestep_to_filename:
+            return timestep_to_filename[user_input]
+
+        # Check if it's a full path that exists
+        input_path = Path(user_input)
+        if input_path.exists() and input_path.is_file():
+            return input_path.name
+
+        # Check if just the filename part matches
+        if '/' in user_input:
+            # User gave a path, extract filename
+            filename = input_path.name
+            if filename in timestep_to_filename.values():
+                return filename
+            # Try to match the filename
+            matches = [f for f in xyz_files if filename in str(f)]
+            if len(matches) == 1:
+                return Path(matches[0]).name
+            elif len(matches) > 1:
+                return matches
+
+        # Try matching against filenames
+        matches = [f for f in xyz_files if user_input in str(f)]
+        if len(matches) == 1:
+            return Path(matches[0]).name
+        elif len(matches) > 1:
+            return matches  # Multiple matches
+        return None  # No match
+
+    # Loop to collect multiple remesh events
+    remesh_event_num = 1
+    while True:
+        print(f"\n{'─'*40}")
+        print(f"📍 Remesh Event #{remesh_event_num}")
+        print(f"{'─'*40}")
+
+        # Get before file
+        before_file = None
+        while True:
+            before_input = input("\n   CSV file BEFORE remesh (last file with old mesh): ").strip()
+            resolved = resolve_file_input(before_input)
+
+            if isinstance(resolved, str):
+                before_file = resolved
+                before_ts = extract_timestep([f for f in xyz_files if resolved in str(f)][0])
+                print(f"   ✅ Found: {before_file} (t={before_ts:.1f}ms)")
+                break
+            elif isinstance(resolved, list):
+                print(f"   ⚠️  Multiple matches found. Please be more specific:")
+                for m in resolved[:5]:
+                    print(f"      - {Path(m).name}")
+            else:
+                print(f"   ❌ File not found. Enter timestep number (e.g., 1000) or filename.")
+                print(f"      Available range: {min(timestep_to_filename.keys(), key=int)} - {max(timestep_to_filename.keys(), key=int)}")
+
+        # Get after file
+        after_file = None
+        while True:
+            after_input = input("\n   CSV file AFTER remesh (first file with new mesh): ").strip()
+            resolved = resolve_file_input(after_input)
+
+            if isinstance(resolved, str):
+                after_file = resolved
+                after_ts = extract_timestep([f for f in xyz_files if resolved in str(f)][0])
+                print(f"   ✅ Found: {after_file} (t={after_ts:.1f}ms)")
+                break
+            elif isinstance(resolved, list):
+                print(f"   ⚠️  Multiple matches found. Please be more specific:")
+                for m in resolved[:5]:
+                    print(f"      - {Path(m).name}")
+            else:
+                print(f"   ❌ File not found. Enter timestep number (e.g., 1001) or filename.")
+
+        # Calculate remesh timestep (midpoint between before and after)
+        before_ts = extract_timestep([f for f in xyz_files if before_file in str(f)][0])
+        after_ts = extract_timestep([f for f in xyz_files if after_file in str(f)][0])
+        remesh_timestep = (before_ts + after_ts) / 2
+
+        # Add this remesh event
+        remesh_event = {
+            'before_file': before_file,
+            'after_file': after_file,
+            'timestep_ms': remesh_timestep
+        }
+        result['remesh_events'].append(remesh_event)
+
+        print(f"\n   ✅ Remesh #{remesh_event_num} recorded: boundary at {remesh_timestep:.1f}ms")
+
+        # Ask if there are more remesh events
+        print(f"\n❓ Is there another remesh event?")
+        while True:
+            response = input("   Another remesh? [y/n]: ").strip().lower()
+            if response in ['y', 'yes']:
+                remesh_event_num += 1
+                break  # Continue outer loop
+            elif response in ['n', 'no']:
+                break  # Exit both loops
+            else:
+                print("   Please enter 'y' or 'n'")
+
+        if response in ['n', 'no']:
+            break  # Exit outer loop
+
+    # Restore default tab completion
+    restore_tab_completion()
+
+    # Sort remesh events by timestep
+    result['remesh_events'].sort(key=lambda e: e['timestep_ms'])
+
+    # Backward compatibility: populate single-remesh fields from first event
+    if result['remesh_events']:
+        first_event = result['remesh_events'][0]
+        result['remesh_before_file'] = first_event['before_file']
+        result['remesh_after_file'] = first_event['after_file']
+        result['remesh_timestep_ms'] = first_event['timestep_ms']
+
+    # Split files into chunks based on all remesh events
+    # For backward compatibility, pre_remesh_files = before first remesh
+    # post_remesh_files = after last remesh
+    if result['remesh_events']:
+        first_boundary = result['remesh_events'][0]['timestep_ms']
+        last_boundary = result['remesh_events'][-1]['timestep_ms']
+
+        result['pre_remesh_files'] = []
+        result['post_remesh_files'] = []
+        for f in xyz_files:
+            ts = extract_timestep(f)
+            if ts is not None:
+                if ts < first_boundary:
+                    result['pre_remesh_files'].append(f)
+                elif ts >= last_boundary:
+                    result['post_remesh_files'].append(f)
+
+    print(f"\n{'='*60}")
+    print(f"✅ Remesh configuration complete:")
+    print(f"   Total remesh events: {len(result['remesh_events'])}")
+    for i, event in enumerate(result['remesh_events'], 1):
+        print(f"   #{i}: boundary at {event['timestep_ms']:.1f}ms")
+        print(f"       before: {event['before_file']}")
+        print(f"       after:  {event['after_file']}")
+    print(f"{'='*60}")
+
+    return result
+
+
+def find_breathing_cycle_bounds(subject_name: str, flow_profile_path: str = None) -> Tuple[float, float]:
     """
     Find the time bounds of a single breathing cycle from the flow profile.
-    
+
     Args:
         subject_name: Name of the subject (e.g., 'OSAMRI007')
-        
+        flow_profile_path: Optional explicit path to flow profile CSV file.
+                          If provided, uses this path instead of auto-detection.
+
     Returns:
         Tuple of (first_crossing_time, last_crossing_time) in milliseconds
     """
     print(f"\nAnalyzing flow profile for subject {subject_name}...")
-    
-    # Find the flow profile file (handles base subject lookup)
-    flow_profile_path = find_flow_profile_file(subject_name)
-    if flow_profile_path is None:
-        print(f"❌ Could not find flow profile for subject {subject_name}")
-        return None, None
-    
+
+    # Use explicit path if provided, otherwise auto-detect
+    if flow_profile_path is not None:
+        flow_profile_path = Path(flow_profile_path)
+        if not flow_profile_path.exists():
+            print(f"❌ Flow profile file not found: {flow_profile_path}")
+            return None, None
+    else:
+        # Find the flow profile file (handles base subject lookup)
+        flow_profile_path = find_flow_profile_file(subject_name)
+        if flow_profile_path is None:
+            print(f"❌ Could not find flow profile for subject {subject_name}")
+            return None, None
+
     print(f"📊 Using flow profile: {flow_profile_path}")
     
     # Read flow profile data
