@@ -1157,9 +1157,19 @@ def load_hdf5_data_for_html_plots(hdf5_file_path: str, time_point: int = None) -
             
             # Load data for the specific time point
             time_data = data[time_idx, :, :]
-            
-            # Create DataFrame
-            df = pd.DataFrame(time_data, columns=column_names)
+
+            # Filter out NaN-padded rows (remesh causes variable point counts per timestep)
+            # Check first column (X coordinate) for NaN - if X is NaN, entire row is padding
+            valid_mask = ~np.isnan(time_data[:, 0])
+            n_total = len(time_data)
+            n_nan = np.sum(~valid_mask)
+            time_data_valid = time_data[valid_mask]
+
+            if n_nan > 0:
+                print(f"  Filtered {n_nan} NaN-padded rows (remesh detected), {len(time_data_valid)} valid points")
+
+            # Create DataFrame with valid data only
+            df = pd.DataFrame(time_data_valid, columns=column_names)
             
             # Add patch numbers based on Face Index resets (same logic as CSV processing)
             if 'Patch Number' not in df.columns:

@@ -4135,21 +4135,32 @@ def main(overwrite_existing: bool = False,
         remesh_detection = detect_remesh_from_file_sizes(xyz_files)
 
         if remesh_detection['has_remesh']:
-            print(f"✓ Auto-detected {len(remesh_detection['remesh_events'])} remesh event(s) (threshold: {remesh_detection['threshold_percent']:.0f}% size change)")
-            for i, event in enumerate(remesh_detection['remesh_events']):
-                print(f"  Event {i+1}: at timestep {event['timestep_boundary']}")
-                print(f"    Before: {event['before_file'].name} ({event['before_size']:,} bytes)")
-                print(f"    After:  {event['after_file'].name} ({event['after_size']:,} bytes)")
-                print(f"    Size change: {event['size_change_percent']:+.1f}%")
+            events = remesh_detection.get('remesh_events', [])
 
-            # Convert to remesh_info format for compatibility
-            remesh_info = {
-                'has_remesh': True,
-                'remesh_events': remesh_detection['remesh_events'],
-                'remesh_before_file': str(remesh_detection['remesh_events'][0]['before_file']),
-                'remesh_after_file': str(remesh_detection['remesh_events'][0]['after_file']),
-                'remesh_timestep_ms': remesh_detection['remesh_events'][0]['timestep_boundary']
-            }
+            # Validate events list before accessing
+            if events and len(events) > 0:
+                print(f"✓ Auto-detected {len(events)} remesh event(s) (threshold: {remesh_detection['threshold_percent']:.0f}% size change)")
+                for i, event in enumerate(events):
+                    print(f"  Event {i+1}: at timestep {event.get('timestep_boundary', 'unknown')}")
+                    before_file = event.get('before_file')
+                    after_file = event.get('after_file')
+                    if before_file:
+                        print(f"    Before: {before_file.name if hasattr(before_file, 'name') else before_file} ({event.get('before_size', 0):,} bytes)")
+                    if after_file:
+                        print(f"    After:  {after_file.name if hasattr(after_file, 'name') else after_file} ({event.get('after_size', 0):,} bytes)")
+                    print(f"    Size change: {event.get('size_change_percent', 0):+.1f}%")
+
+                # Convert to remesh_info format for compatibility (safe access with .get())
+                remesh_info = {
+                    'has_remesh': True,
+                    'remesh_events': events,
+                    'remesh_before_file': str(events[0].get('before_file', '')),
+                    'remesh_after_file': str(events[0].get('after_file', '')),
+                    'remesh_timestep_ms': events[0].get('timestep_boundary')
+                }
+            else:
+                print(f"⚠ Remesh flagged but no event details found - continuing without remesh info")
+                remesh_info = {'has_remesh': False, 'remesh_events': []}
         else:
             print(f"✓ No remesh detected (max file size variation: {remesh_detection['max_size_variation_percent']:.1f}%, threshold: {remesh_detection['threshold_percent']:.0f}%)")
             remesh_info = {'has_remesh': False, 'remesh_events': []}
@@ -4210,15 +4221,19 @@ def main(overwrite_existing: bool = False,
             )
             print(f"✅ HDF5 conversion complete: {data_info['file_path']}")
 
-            # Store remesh metadata in HDF5
-            store_remesh_metadata(
-                hdf5_file_path,
-                has_remesh=remesh_info['has_remesh'],
-                remesh_before_file=remesh_info.get('remesh_before_file'),
-                remesh_after_file=remesh_info.get('remesh_after_file'),
-                remesh_timestep_ms=remesh_info.get('remesh_timestep_ms'),
-                remesh_events=remesh_info.get('remesh_events', [])
-            )
+            # Store remesh metadata in HDF5 (non-critical - don't fail pipeline if this fails)
+            try:
+                store_remesh_metadata(
+                    hdf5_file_path,
+                    has_remesh=remesh_info['has_remesh'],
+                    remesh_before_file=remesh_info.get('remesh_before_file'),
+                    remesh_after_file=remesh_info.get('remesh_after_file'),
+                    remesh_timestep_ms=remesh_info.get('remesh_timestep_ms'),
+                    remesh_events=remesh_info.get('remesh_events', [])
+                )
+            except Exception as e:
+                print(f"⚠️  Failed to store remesh metadata in HDF5: {e}")
+                print(f"   Continuing - remesh info will be in metadata.json only")
 
             # Store flow profile in HDF5 (so Phase 2 doesn't need the CSV file)
             if flow_profile_path:
