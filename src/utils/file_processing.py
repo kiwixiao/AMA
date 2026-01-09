@@ -1429,9 +1429,508 @@ def detect_time_unit(xyz_files: List[Path]) -> str:
                     return 's'
             
         return 'unknown'
-        
+
     except Exception:
         return 'unknown'
+
+
+def detect_timestep_from_csv(xyz_file: Path) -> Dict:
+    """
+    Read actual timestep from CSV 'Time Step (s)' column.
+
+    Only needs to read first CSV file (all tables have same timestep info).
+    This is more accurate than guessing from filename patterns.
+
+    Args:
+        xyz_file: Path to any XYZ table CSV file
+
+    Returns:
+        {
+            'time_seconds': float,     # e.g., 0.001
+            'time_ms': float,          # e.g., 1.0
+            'time_column_name': str,   # Column name found
+            'source_file': Path
+        }
+
+    Raises:
+        ValueError: If no time column found or file cannot be read
+    """
+    # Read just the first few rows for efficiency
+    try:
+        df = pd.read_csv(xyz_file, nrows=5)
+    except Exception as e:
+        raise ValueError(f"Could not read CSV file {xyz_file}: {e}")
+
+    # Look for time column (various possible names)
+    time_column_patterns = [
+        'Time Step (s)',
+        'Time Step(s)',
+        'TimeStep (s)',
+        'TimeStep(s)',
+        'Time (s)',
+        'Time(s)',
+        'time_step',
+        'timestep',
+    ]
+
+    time_column = None
+    for col in df.columns:
+        col_lower = col.lower().strip()
+        for pattern in time_column_patterns:
+            if pattern.lower() in col_lower or col_lower in pattern.lower():
+                time_column = col
+                break
+        if time_column:
+            break
+
+    if time_column is None:
+        # Try regex match for any column containing "time" and "step"
+        for col in df.columns:
+            if 'time' in col.lower() and ('step' in col.lower() or '(s)' in col.lower()):
+                time_column = col
+                break
+
+    if time_column is None:
+        raise ValueError(f"Could not find time column in {xyz_file}. Available columns: {list(df.columns)}")
+
+    # Get the time value (should be same for all rows in a file)
+    time_seconds = float(df[time_column].iloc[0])
+    time_ms = time_seconds * 1000.0
+
+    return {
+        'time_seconds': time_seconds,
+        'time_ms': time_ms,
+        'time_column_name': time_column,
+        'source_file': xyz_file
+    }
+
+
+def detect_remesh_from_file_sizes(xyz_files: List[Path],
+                                   size_change_threshold: float = 0.02) -> Dict:
+    """
+    Detect remesh events by scanning file sizes in chronological order.
+
+    A 2% or greater file size change indicates a remesh.
+    Small variations (<2%) are ignored as they may be due to floating point
+    precision differences in data values, not mesh changes.
+
+    Args:
+        xyz_files: List of XYZ table files (should be in chronological order)
+        size_change_threshold: Minimum relative size change to trigger detection (default 0.02 = 2%)
+
+    Returns:
+        {
+            'has_remesh': bool,
+            'remesh_events': [
+                {
+                    'before_file': Path,
+                    'after_file': Path,
+                    'before_size': int,
+                    'after_size': int,
+                    'size_change_percent': float,
+                    'timestep_boundary': float  # timestep of after_file
+                }
+            ],
+            'max_size_variation_percent': float,
+            'threshold_percent': float
+        }
+    """
+    if len(xyz_files) < 2:
+        return {
+            'has_remesh': False,
+            'remesh_events': [],
+            'max_size_variation_percent': 0.0,
+            'threshold_percent': size_change_threshold * 100
+        }
+
+    remesh_events = []
+    max_variation = 0.0
+
+    # Get file sizes
+    file_sizes = []
+    for f in xyz_files:
+        try:
+            size = f.stat().st_size
+            file_sizes.append((f, size))
+        except OSError:
+            continue
+
+    if len(file_sizes) < 2:
+        return {
+            'has_remesh': False,
+            'remesh_events': [],
+            'max_size_variation_percent': 0.0,
+            'threshold_percent': size_change_threshold * 100
+        }
+
+    # Compare consecutive files
+    for i in range(len(file_sizes) - 1):
+        before_file, before_size = file_sizes[i]
+        after_file, after_size = file_sizes[i + 1]
+
+        if before_size == 0:
+            continue
+
+        # Calculate relative change
+        size_change = abs(after_size - before_size) / before_size
+        size_change_percent = size_change * 100
+
+        max_variation = max(max_variation, size_change_percent)
+
+        # Check if this exceeds threshold
+        if size_change >= size_change_threshold:
+            # Extract timestep from after_file for boundary
+            try:
+                timestep = extract_timestep_from_filename(after_file)
+            except ValueError:
+                timestep = float(i + 1)  # Fallback to index
+
+            remesh_events.append({
+                'before_file': before_file,
+                'after_file': after_file,
+                'before_size': before_size,
+                'after_size': after_size,
+                'size_change_percent': size_change_percent,
+                'timestep_boundary': timestep
+            })
+
+    return {
+        'has_remesh': len(remesh_events) > 0,
+        'remesh_events': remesh_events,
+        'max_size_variation_percent': max_variation,
+        'threshold_percent': size_change_threshold * 100
+    }
+
+
+def detect_breathing_cycle_enhanced(
+    flow_profile_path: Optional[Path],
+    xyz_files: List[Path],
+    timestep_info: Optional[Dict] = None,
+    is_complete_cycle: Optional[bool] = None,
+    manual_times: Optional[Dict] = None
+) -> Dict:
+    """
+    Enhanced breathing cycle detection with four modes.
+
+    Mode M: Manual Input (CLI args or interactive)
+        - User specifies all 3 key times directly in seconds
+        - Highest priority - skips all auto-detection
+
+    Mode A: Complete Single Cycle (user confirms 'a')
+        - First time point = beginning of inhale
+        - Last time point = end of exhale
+        - Zero crossing in middle 80% = inhale-to-exhale transition
+
+    Mode B: Multi-Cycle Detection (user confirms 'b')
+        - Use existing algorithm: find all zero crossings
+        - First crossing = beginning of inhale
+        - Subsequent crossings = transitions
+
+    Mode C: No Flow Profile
+        - Calculate time history from: timestep × number of files
+        - Assume all files are within one breathing cycle
+        - Inhale-to-exhale = middle of total time
+
+    Args:
+        flow_profile_path: Path to flow profile CSV (None for Mode C)
+        xyz_files: List of XYZ table files
+        timestep_info: Output from detect_timestep_from_csv() (required for Mode C)
+        is_complete_cycle: True=Mode A, False=Mode B, None=ask user (only if flow_profile exists)
+        manual_times: Dict with 'start_s', 'transition_s', 'end_s' for manual mode (all in seconds)
+
+    Returns:
+        {
+            'mode': 'complete_cycle' | 'multi_cycle' | 'no_flow_profile' | 'manual' | 'manual_cli',
+            'start_time_ms': float,
+            'end_time_ms': float,
+            'inhale_exhale_transition_ms': float,
+            'total_duration_ms': float,
+            'flow_profile_used': bool,
+            'zero_crossings_ms': List[float],  # All zero crossings found
+            'user_input': Dict  # Original user input (for manual modes)
+        }
+    """
+    result = {
+        'mode': None,
+        'start_time_ms': None,
+        'end_time_ms': None,
+        'inhale_exhale_transition_ms': None,
+        'total_duration_ms': None,
+        'flow_profile_used': False,
+        'zero_crossings_ms': [],
+        'user_input': None
+    }
+
+    # Mode M: Manual Input (highest priority - from CLI args)
+    if manual_times is not None:
+        start_s = manual_times.get('start_s')
+        transition_s = manual_times.get('transition_s')
+        end_s = manual_times.get('end_s')
+
+        if start_s is not None and transition_s is not None and end_s is not None:
+            # Validate order
+            if not (start_s < transition_s < end_s):
+                print(f"❌ ERROR: Times must be in order: start < transition < end")
+                print(f"   Got: start={start_s}s, transition={transition_s}s, end={end_s}s")
+                raise ValueError("Manual times are not in chronological order")
+
+            # Validate positive
+            if start_s < 0 or transition_s < 0 or end_s < 0:
+                print(f"❌ ERROR: All times must be positive")
+                raise ValueError("Manual times must be positive")
+
+            result['mode'] = 'manual_cli'
+            result['start_time_ms'] = start_s * 1000.0
+            result['end_time_ms'] = end_s * 1000.0
+            result['inhale_exhale_transition_ms'] = transition_s * 1000.0
+            result['total_duration_ms'] = (end_s - start_s) * 1000.0
+            result['flow_profile_used'] = flow_profile_path is not None and Path(flow_profile_path).exists()
+            result['user_input'] = {
+                'start_s': start_s,
+                'transition_s': transition_s,
+                'end_s': end_s
+            }
+
+            print(f"\n✓ Breathing cycle mode: Manual (CLI arguments)")
+            print(f"  Start of inhale: {result['start_time_ms']:.1f} ms ({start_s:.3f} s)")
+            print(f"  Inhale-exhale transition: {result['inhale_exhale_transition_ms']:.1f} ms ({transition_s:.3f} s)")
+            print(f"  End of exhale: {result['end_time_ms']:.1f} ms ({end_s:.3f} s)")
+            return result
+
+    # Mode C: No Flow Profile
+    if flow_profile_path is None or not Path(flow_profile_path).exists():
+        result['mode'] = 'no_flow_profile'
+        result['flow_profile_used'] = False
+
+        if not xyz_files:
+            print("❌ No XYZ files provided for breathing cycle detection")
+            return result
+
+        # Get timestep info if not provided
+        if timestep_info is None:
+            try:
+                timestep_info = detect_timestep_from_csv(xyz_files[0])
+            except ValueError as e:
+                print(f"⚠ Could not detect timestep: {e}")
+                print("  Using default 1ms timestep")
+                timestep_info = {'time_ms': 1.0, 'time_seconds': 0.001}
+
+        # Calculate time range from files
+        timestep_ms = timestep_info['time_ms']
+        n_files = len(xyz_files)
+
+        # Get actual timesteps from first and last files
+        try:
+            first_timestep = extract_timestep_from_filename(xyz_files[0])
+            last_timestep = extract_timestep_from_filename(xyz_files[-1])
+
+            # Determine if timesteps are in seconds or milliseconds
+            time_unit = detect_time_unit(xyz_files)
+            if time_unit == 's':
+                start_time_ms = first_timestep * 1000
+                end_time_ms = last_timestep * 1000
+            else:
+                start_time_ms = first_timestep
+                end_time_ms = last_timestep
+        except ValueError:
+            # Fallback: calculate from count and timestep
+            start_time_ms = 0.0
+            end_time_ms = timestep_ms * (n_files - 1)
+
+        total_duration_ms = end_time_ms - start_time_ms
+        inhale_exhale_ms = start_time_ms + (total_duration_ms / 2.0)
+
+        result['start_time_ms'] = start_time_ms
+        result['end_time_ms'] = end_time_ms
+        result['inhale_exhale_transition_ms'] = inhale_exhale_ms
+        result['total_duration_ms'] = total_duration_ms
+
+        print(f"\n📊 Breathing Cycle Detection (No Flow Profile)")
+        print(f"   Mode: Assumed single cycle from CSV files")
+        print(f"   Timestep: {timestep_ms:.3f} ms (from CSV data)")
+        print(f"   Files: {n_files}")
+        print(f"   Start time: {start_time_ms:.1f} ms")
+        print(f"   End time: {end_time_ms:.1f} ms")
+        print(f"   Inhale-exhale transition: {inhale_exhale_ms:.1f} ms (midpoint)")
+
+        return result
+
+    # Load flow profile
+    flow_profile_path = Path(flow_profile_path)
+    print(f"\n📊 Loading flow profile: {flow_profile_path}")
+
+    try:
+        flow_df = pd.read_csv(flow_profile_path)
+    except Exception as e:
+        print(f"❌ Could not read flow profile: {e}")
+        # Fall back to Mode C
+        return detect_breathing_cycle_enhanced(None, xyz_files, timestep_info, None)
+
+    # Extract time and flow data
+    time_s = flow_df.iloc[:, 0].values  # Time in seconds
+    flow = flow_df.iloc[:, 1].values    # Flow rate
+    time_ms = time_s * 1000.0           # Convert to milliseconds
+
+    result['flow_profile_used'] = True
+
+    # Find all zero crossings
+    zero_crossing_indices = np.where(np.diff(np.signbit(flow)))[0]
+    zero_crossings_ms = [time_ms[i] for i in zero_crossing_indices]
+    result['zero_crossings_ms'] = zero_crossings_ms
+
+    print(f"   Time range: {time_ms[0]:.1f} ms to {time_ms[-1]:.1f} ms")
+    print(f"   Zero crossings found: {len(zero_crossings_ms)}")
+
+    # Ask user about breathing cycle mode if not specified
+    manual_mode_selected = False
+    if is_complete_cycle is None:
+        print(f"\n{'='*60}")
+        print(f"Flow profile: {flow_profile_path.name}")
+        print(f"\nHow should we detect breathing cycle boundaries?")
+        print(f"  [a] Auto-Complete - First point = start of inhale, last = end of exhale")
+        print(f"  [b] Auto-Detect   - Use zero-crossing detection for multiple cycles")
+        print(f"  [m] Manual        - Specify the time points manually (in seconds)")
+        print(f"{'='*60}")
+
+        while True:
+            try:
+                response = input("> ").strip().lower()
+                if response in ['a', 'y', 'yes']:
+                    is_complete_cycle = True
+                    break
+                elif response in ['b', 'n', 'no']:
+                    is_complete_cycle = False
+                    break
+                elif response in ['m', 'manual']:
+                    manual_mode_selected = True
+                    break
+                else:
+                    print("Please enter 'a', 'b', or 'm'")
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Defaulting to automatic zero-crossing detection (Mode B)")
+                is_complete_cycle = False
+                break
+
+    # Mode M: Manual Input (interactive)
+    if manual_mode_selected:
+        print(f"\n📝 Enter time points in SECONDS:")
+        print(f"   (Flow profile time range: {time_ms[0]/1000:.3f}s to {time_ms[-1]/1000:.3f}s)")
+
+        while True:
+            try:
+                start_s = float(input("  Begin of inhale (s): ").strip())
+                transition_s = float(input("  Inhale-to-exhale transition (s): ").strip())
+                end_s = float(input("  End of exhale (s): ").strip())
+
+                # Validate order
+                if not (start_s < transition_s < end_s):
+                    print(f"❌ Times must be in order: start < transition < end")
+                    print(f"   Got: {start_s}s < {transition_s}s < {end_s}s - try again")
+                    continue
+
+                # Validate positive
+                if start_s < 0 or transition_s < 0 or end_s < 0:
+                    print(f"❌ All times must be positive - try again")
+                    continue
+
+                # Warn if outside flow profile range (but allow it)
+                if start_s < time_ms[0]/1000 or end_s > time_ms[-1]/1000:
+                    print(f"⚠ Warning: Some times are outside flow profile range")
+
+                result['mode'] = 'manual'
+                result['start_time_ms'] = start_s * 1000.0
+                result['end_time_ms'] = end_s * 1000.0
+                result['inhale_exhale_transition_ms'] = transition_s * 1000.0
+                result['total_duration_ms'] = (end_s - start_s) * 1000.0
+                result['flow_profile_used'] = True
+                result['user_input'] = {
+                    'start_s': start_s,
+                    'transition_s': transition_s,
+                    'end_s': end_s
+                }
+
+                print(f"\n✓ Breathing cycle mode: Manual (interactive)")
+                print(f"  Start of inhale: {result['start_time_ms']:.1f} ms ({start_s:.3f} s)")
+                print(f"  Inhale-exhale transition: {result['inhale_exhale_transition_ms']:.1f} ms ({transition_s:.3f} s)")
+                print(f"  End of exhale: {result['end_time_ms']:.1f} ms ({end_s:.3f} s)")
+                return result
+
+            except ValueError:
+                print("❌ Invalid input - please enter numeric values")
+                continue
+            except (EOFError, KeyboardInterrupt):
+                print("\n  Cancelled manual input - falling back to Mode B")
+                is_complete_cycle = False
+                break
+
+    # Mode A: Complete Single Cycle
+    if is_complete_cycle:
+        result['mode'] = 'complete_cycle'
+        result['start_time_ms'] = time_ms[0]
+        result['end_time_ms'] = time_ms[-1]
+        result['total_duration_ms'] = time_ms[-1] - time_ms[0]
+
+        # Find zero crossing in middle 80% of the data
+        n_points = len(time_ms)
+        middle_start = int(n_points * 0.1)
+        middle_end = int(n_points * 0.9)
+
+        # Find zero crossings within middle 80%
+        middle_crossings = [
+            zc for zc in zero_crossings_ms
+            if time_ms[middle_start] <= zc <= time_ms[middle_end]
+        ]
+
+        if middle_crossings:
+            # Use the first zero crossing in the middle region
+            result['inhale_exhale_transition_ms'] = middle_crossings[0]
+        elif zero_crossings_ms:
+            # Fallback: use first zero crossing overall
+            result['inhale_exhale_transition_ms'] = zero_crossings_ms[0]
+        else:
+            # No zero crossings: use midpoint
+            result['inhale_exhale_transition_ms'] = (time_ms[0] + time_ms[-1]) / 2.0
+
+        print(f"\n✓ Breathing cycle mode: Complete single cycle")
+        print(f"  Start of inhale: {result['start_time_ms']:.1f} ms")
+        print(f"  Inhale-exhale transition: {result['inhale_exhale_transition_ms']:.1f} ms")
+        print(f"  End of exhale: {result['end_time_ms']:.1f} ms")
+
+    # Mode B: Multi-Cycle Detection
+    else:
+        result['mode'] = 'multi_cycle'
+
+        if len(zero_crossings_ms) >= 2:
+            result['start_time_ms'] = zero_crossings_ms[0]
+            result['end_time_ms'] = zero_crossings_ms[-1]
+
+            # Second zero crossing is inhale-to-exhale
+            if len(zero_crossings_ms) >= 2:
+                result['inhale_exhale_transition_ms'] = zero_crossings_ms[1]
+            else:
+                result['inhale_exhale_transition_ms'] = (zero_crossings_ms[0] + zero_crossings_ms[-1]) / 2.0
+
+            result['total_duration_ms'] = result['end_time_ms'] - result['start_time_ms']
+
+            print(f"\n✓ Breathing cycle mode: Multi-cycle detection")
+            print(f"  First zero crossing (start of inhale): {result['start_time_ms']:.1f} ms")
+            print(f"  Second zero crossing (inhale-exhale): {result['inhale_exhale_transition_ms']:.1f} ms")
+            print(f"  Last zero crossing (end of exhale): {result['end_time_ms']:.1f} ms")
+        else:
+            # Not enough zero crossings - use full range with midpoint
+            result['start_time_ms'] = time_ms[0]
+            result['end_time_ms'] = time_ms[-1]
+            result['inhale_exhale_transition_ms'] = (time_ms[0] + time_ms[-1]) / 2.0
+            result['total_duration_ms'] = time_ms[-1] - time_ms[0]
+
+            print(f"\n⚠ Not enough zero crossings found ({len(zero_crossings_ms)})")
+            print(f"  Using full time range with midpoint transition")
+            print(f"  Start: {result['start_time_ms']:.1f} ms")
+            print(f"  Transition: {result['inhale_exhale_transition_ms']:.1f} ms")
+            print(f"  End: {result['end_time_ms']:.1f} ms")
+
+    return result
+
 
 def get_xyz_file_info(subject_name: str) -> Dict:
     """
@@ -1713,4 +2212,308 @@ def get_timestep_range_info(subject_name: str) -> Dict:
         'total_duration': total_duration,
         'time_unit': time_unit,
         'chronological_files': files_in_order
-    } 
+    }
+
+
+def create_metadata_json(subject_name: str, output_dir: Path,
+                         timestep_info: Dict = None,
+                         breathing_cycle: Dict = None,
+                         remesh_info: Dict = None,
+                         light_hdf5_timestep_ms: float = None) -> Path:
+    """
+    Create the system-generated metadata JSON file.
+
+    This file contains all auto-detected configuration that shouldn't be
+    edited by users. It's separate from picked_points.json which users edit.
+
+    Args:
+        subject_name: Subject identifier
+        output_dir: Directory to save the metadata file
+        timestep_info: Dict from detect_timestep_from_csv()
+        breathing_cycle: Dict from detect_breathing_cycle_enhanced()
+        remesh_info: Dict from detect_remesh_from_file_sizes()
+        light_hdf5_timestep_ms: Timestep used for lightweight HDF5 extraction
+
+    Returns:
+        Path to the created metadata JSON file
+    """
+    from datetime import datetime
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "subject": subject_name,
+        "created": datetime.now().isoformat(),
+        "phase1_complete": True,
+
+        "timestep_info": timestep_info or {
+            "time_ms": 1.0,
+            "time_column_name": "unknown",
+            "source_file": "unknown"
+        },
+
+        "breathing_cycle": breathing_cycle or {
+            "mode": "unknown",
+            "start_time_ms": 0.0,
+            "end_time_ms": 0.0,
+            "inhale_exhale_transition_ms": 0.0,
+            "flow_profile_used": False
+        },
+
+        "remesh_info": remesh_info or {
+            "has_remesh": False,
+            "remesh_events": [],
+            "max_size_variation_percent": 0.0,
+            "detection_threshold_percent": 2.0
+        },
+
+        "light_hdf5_info": {
+            "timestep_ms": light_hdf5_timestep_ms,
+            "filename": f"{subject_name}_cfd_data_light.h5" if light_hdf5_timestep_ms else None
+        },
+
+        # This will be populated by Phase 2 when user provides picked points
+        "post_remesh_mappings": []
+    }
+
+    output_path = output_dir / f"{subject_name}_metadata.json"
+
+    with open(output_path, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str)
+
+    print(f"✅ Created metadata JSON: {output_path}")
+    return output_path
+
+
+def create_picked_points_template(subject_name: str, output_dir: Path,
+                                  timestep_ms: float = None,
+                                  light_hdf5_filename: str = None) -> Path:
+    """
+    Create an empty picked points template JSON for user to fill in.
+
+    This file is portable and designed to be:
+    1. Copied to local machine with lightweight HDF5
+    2. Filled in using point picker GUI
+    3. Copied back to cluster for Phase 2 processing
+
+    Args:
+        subject_name: Subject identifier
+        output_dir: Directory to save the template
+        timestep_ms: Timestep of the lightweight HDF5 file
+        light_hdf5_filename: Name of the lightweight HDF5 file
+
+    Returns:
+        Path to the created template JSON file
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    template = {
+        "subject": subject_name,
+        "created_from": light_hdf5_filename or f"{subject_name}_cfd_data_light.h5",
+        "timestep_ms": timestep_ms,
+        "locations": [
+            {
+                "id": 1,
+                "description": "Example: Posterior soft palate - UPDATE THIS",
+                "patch_number": 0,
+                "face_indices": [0],
+                "coordinates": [0.0, 0.0, 0.0]
+            }
+        ],
+        "_instructions": {
+            "step1": "Copy this file and the lightweight HDF5 to your local machine",
+            "step2": "Run: python src/main.py --subject {subject} --point-picker --light-h5",
+            "step3": "Pick points interactively using the GUI",
+            "step4": "Copy this file back to the cluster results folder",
+            "step5": "Run Phase 2: python src/main.py --subject {subject} --plotting"
+        }
+    }
+
+    output_path = output_dir / f"{subject_name}_picked_points.json"
+
+    with open(output_path, 'w') as f:
+        json.dump(template, f, indent=2)
+
+    print(f"✅ Created picked points template: {output_path}")
+    return output_path
+
+
+def load_picked_points(subject_name: str, results_dir: Path = None) -> Optional[Dict]:
+    """
+    Load the picked points JSON file.
+
+    Args:
+        subject_name: Subject identifier
+        results_dir: Results directory (defaults to {subject}_results/)
+
+    Returns:
+        Dict with picked points or None if not found
+    """
+    if results_dir is None:
+        results_dir = Path(f"{subject_name}_results")
+
+    picked_points_path = results_dir / f"{subject_name}_picked_points.json"
+
+    if not picked_points_path.exists():
+        return None
+
+    with open(picked_points_path, 'r') as f:
+        return json.load(f)
+
+
+def load_metadata(subject_name: str, results_dir: Path = None) -> Optional[Dict]:
+    """
+    Load the metadata JSON file.
+
+    Args:
+        subject_name: Subject identifier
+        results_dir: Results directory (defaults to {subject}_results/)
+
+    Returns:
+        Dict with metadata or None if not found
+    """
+    if results_dir is None:
+        results_dir = Path(f"{subject_name}_results")
+
+    metadata_path = results_dir / f"{subject_name}_metadata.json"
+
+    if not metadata_path.exists():
+        return None
+
+    with open(metadata_path, 'r') as f:
+        return json.load(f)
+
+
+def load_and_merge_configs(subject_name: str, results_dir: Path = None) -> Dict:
+    """
+    Load and merge picked_points.json and metadata.json for Phase 2 processing.
+
+    This function:
+    1. Loads both JSON files from the results directory
+    2. Merges them into the format expected by the tracking system
+    3. Falls back to legacy tracking_locations.json if new files don't exist
+
+    Args:
+        subject_name: Subject identifier
+        results_dir: Results directory (defaults to {subject}_results/)
+
+    Returns:
+        Merged configuration dict ready for tracking
+    """
+    if results_dir is None:
+        results_dir = Path(f"{subject_name}_results")
+    else:
+        results_dir = Path(results_dir)
+
+    # Try new split file format first
+    picked_points = load_picked_points(subject_name, results_dir)
+    metadata = load_metadata(subject_name, results_dir)
+
+    if picked_points is not None and metadata is not None:
+        print(f"✅ Loading split JSON format (picked_points + metadata)")
+
+        # Filter out template/example locations
+        valid_locations = [
+            loc for loc in picked_points.get("locations", [])
+            if loc.get("patch_number", 0) != 0 or
+               loc.get("coordinates", [0, 0, 0]) != [0.0, 0.0, 0.0]
+        ]
+
+        if not valid_locations:
+            print("⚠️  No valid picked points found (only template entries)")
+            print("   Please run the point picker to select anatomical landmarks")
+
+        # Merge into tracking config format
+        merged_config = {
+            "subject": subject_name,
+            "source": "split_json",
+            "locations": valid_locations,
+            "combinations": [],  # Can be added later if needed
+
+            # Include metadata for reference
+            "timestep_info": metadata.get("timestep_info", {}),
+            "breathing_cycle": metadata.get("breathing_cycle", {}),
+            "remesh_info": metadata.get("remesh_info", {}),
+            "post_remesh_mappings": metadata.get("post_remesh_mappings", [])
+        }
+
+        return merged_config
+
+    # Fall back to legacy tracking_locations.json
+    legacy_path = results_dir / f"{subject_name}_tracking_locations.json"
+    if legacy_path.exists():
+        print(f"📂 Using legacy tracking_locations.json format")
+        with open(legacy_path, 'r') as f:
+            legacy_config = json.load(f)
+            legacy_config["source"] = "legacy_tracking_locations"
+            return legacy_config
+
+    # Also check root directory for backward compatibility
+    root_legacy_path = Path(f"{subject_name}_tracking_locations.json")
+    if root_legacy_path.exists():
+        print(f"📂 Using legacy tracking_locations.json from root directory")
+        with open(root_legacy_path, 'r') as f:
+            legacy_config = json.load(f)
+            legacy_config["source"] = "legacy_root"
+            return legacy_config
+
+    # No config found
+    print(f"❌ No tracking configuration found for {subject_name}")
+    print(f"   Expected files:")
+    print(f"   - {results_dir}/{subject_name}_picked_points.json")
+    print(f"   - {results_dir}/{subject_name}_metadata.json")
+    print(f"   Or legacy: {results_dir}/{subject_name}_tracking_locations.json")
+
+    return {
+        "subject": subject_name,
+        "source": "none",
+        "locations": [],
+        "combinations": [],
+        "error": "No tracking configuration found"
+    }
+
+
+def save_post_remesh_mappings(subject_name: str, mappings: List[Dict],
+                               results_dir: Path = None) -> Path:
+    """
+    Save post-remesh mappings to the metadata.json file.
+
+    This is called during Phase 2 after coordinate matching is performed
+    for subjects with remesh events.
+
+    Args:
+        subject_name: Subject identifier
+        mappings: List of remesh mapping dicts
+        results_dir: Results directory
+
+    Returns:
+        Path to the updated metadata JSON file
+    """
+    if results_dir is None:
+        results_dir = Path(f"{subject_name}_results")
+    else:
+        results_dir = Path(results_dir)
+
+    metadata_path = results_dir / f"{subject_name}_metadata.json"
+
+    if not metadata_path.exists():
+        print(f"⚠️  Metadata file not found: {metadata_path}")
+        print(f"   Creating new metadata file with remesh mappings")
+        metadata = {
+            "subject": subject_name,
+            "created": None,
+            "phase1_complete": False,
+            "post_remesh_mappings": mappings
+        }
+    else:
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        metadata["post_remesh_mappings"] = mappings
+
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=2, default=str)
+
+    print(f"✅ Saved post-remesh mappings to: {metadata_path}")
+    return metadata_path

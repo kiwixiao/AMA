@@ -33,6 +33,8 @@ if __name__ == '__main__':
 # Now import modules consistently
 from utils.file_processing import (
     load_tracking_locations,
+    load_and_merge_configs,
+    save_post_remesh_mappings,
     preprocess_all_tables,
     preprocess_all_tables_parallel,
     find_breathing_cycle_bounds,
@@ -4073,7 +4075,10 @@ def main(overwrite_existing: bool = False,
             find_flow_profile_file,
             validate_subject_files,
             create_template_tracking_locations,
-            ask_remesh_questions_interactive
+            ask_remesh_questions_interactive,
+            detect_timestep_from_csv,
+            detect_remesh_from_file_sizes,
+            detect_breathing_cycle_enhanced
         )
         from data_processing.trajectory import auto_select_csv_to_hdf5_method, store_remesh_metadata
 
@@ -4115,18 +4120,84 @@ def main(overwrite_existing: bool = False,
         timestep_file_pairs.sort(key=lambda x: x[0])
         xyz_files = [f for _, f in timestep_file_pairs]
 
-        # Ask about remesh configuration
-        remesh_info = ask_remesh_questions_interactive(xyz_files)
-
-        # Filter by breathing cycle using explicit flow profile
+        # Auto-detect timestep from CSV column
+        print(f"\n🔍 Auto-detecting timestep from CSV data...")
         try:
-            start_time, end_time = find_breathing_cycle_bounds(subject_name, flow_profile_path)
-            if start_time is not None and end_time is not None:
-                xyz_files = filter_xyz_files_by_time(xyz_files, start_time, end_time)
-                print(f"🫁 Filtered to breathing cycle: {start_time:.1f}ms - {end_time:.1f}ms")
-                print(f"   {len(xyz_files)} files in breathing cycle")
-        except Exception as e:
-            print(f"⚠️  Could not filter by breathing cycle: {e}")
+            timestep_info = detect_timestep_from_csv(xyz_files[0])
+            print(f"✓ Detected timestep: {timestep_info['time_ms']:.3f} ms (from column '{timestep_info['time_column_name']}')")
+        except ValueError as e:
+            print(f"⚠ Could not detect timestep from CSV: {e}")
+            print("  Using filename-based detection as fallback")
+            timestep_info = None
+
+        # Auto-detect remesh from file size changes (2% threshold)
+        print(f"\n🔍 Auto-detecting remesh from file sizes...")
+        remesh_detection = detect_remesh_from_file_sizes(xyz_files)
+
+        if remesh_detection['has_remesh']:
+            print(f"✓ Auto-detected {len(remesh_detection['remesh_events'])} remesh event(s) (threshold: {remesh_detection['threshold_percent']:.0f}% size change)")
+            for i, event in enumerate(remesh_detection['remesh_events']):
+                print(f"  Event {i+1}: at timestep {event['timestep_boundary']}")
+                print(f"    Before: {event['before_file'].name} ({event['before_size']:,} bytes)")
+                print(f"    After:  {event['after_file'].name} ({event['after_size']:,} bytes)")
+                print(f"    Size change: {event['size_change_percent']:+.1f}%")
+
+            # Convert to remesh_info format for compatibility
+            remesh_info = {
+                'has_remesh': True,
+                'remesh_events': remesh_detection['remesh_events'],
+                'remesh_before_file': str(remesh_detection['remesh_events'][0]['before_file']),
+                'remesh_after_file': str(remesh_detection['remesh_events'][0]['after_file']),
+                'remesh_timestep_ms': remesh_detection['remesh_events'][0]['timestep_boundary']
+            }
+        else:
+            print(f"✓ No remesh detected (max file size variation: {remesh_detection['max_size_variation_percent']:.1f}%, threshold: {remesh_detection['threshold_percent']:.0f}%)")
+            remesh_info = {'has_remesh': False, 'remesh_events': []}
+
+        # Enhanced breathing cycle detection (supports 4 modes: A, B, C, M)
+        print(f"\n🫁 Detecting breathing cycle...")
+
+        # Check for CLI manual override arguments
+        manual_times = None
+        if hasattr(args, 'inhale_start') or hasattr(args, 'transition') or hasattr(args, 'exhale_end'):
+            inhale_start = getattr(args, 'inhale_start', None)
+            transition = getattr(args, 'transition', None)
+            exhale_end = getattr(args, 'exhale_end', None)
+
+            if inhale_start is not None or transition is not None or exhale_end is not None:
+                manual_times = {
+                    'start_s': inhale_start,
+                    'transition_s': transition,
+                    'end_s': exhale_end
+                }
+                # Check if all 3 are provided
+                if all(v is not None for v in [inhale_start, transition, exhale_end]):
+                    print(f"📝 Using CLI manual override for breathing cycle times")
+                else:
+                    print(f"⚠ Partial CLI times provided - will prompt for missing values")
+                    manual_times = None  # Fall back to interactive if incomplete
+
+        breathing_cycle = detect_breathing_cycle_enhanced(
+            flow_profile_path=flow_profile_path,
+            xyz_files=xyz_files,
+            timestep_info=timestep_info,
+            is_complete_cycle=None,  # Will prompt user if flow profile exists
+            manual_times=manual_times
+        )
+
+        start_time = breathing_cycle['start_time_ms']
+        end_time = breathing_cycle['end_time_ms']
+        inhale_exhale_transition = breathing_cycle['inhale_exhale_transition_ms']
+
+        if start_time is not None and end_time is not None:
+            # Filter files to breathing cycle range
+            xyz_files_filtered = filter_xyz_files_by_time(xyz_files, start_time, end_time)
+            if xyz_files_filtered:
+                xyz_files = xyz_files_filtered
+                print(f"✓ Filtered to breathing cycle: {start_time:.1f}ms - {end_time:.1f}ms")
+                print(f"  {len(xyz_files)} files in breathing cycle")
+            else:
+                print(f"⚠ No files in breathing cycle range, using all files")
 
         # Convert to HDF5 with breathing cycle metadata (save in results folder)
         hdf5_file_path = f"{subject_name}_results/{subject_name}_cfd_data.h5"
@@ -4153,6 +4224,26 @@ def main(overwrite_existing: bool = False,
             if flow_profile_path:
                 from data_processing.trajectory import store_flow_profile
                 store_flow_profile(hdf5_file_path, flow_profile_path)
+
+            # Create lightweight HDF5 for portable point picking
+            light_hdf5_path = f"{subject_name}_results/{subject_name}_cfd_data_light.h5"
+            print(f"\n📦 Creating lightweight HDF5 for point picking...")
+            try:
+                from data_processing.trajectory import extract_single_timestep_to_hdf5
+                light_timestep_ms = start_time if start_time is not None else 0.0
+                light_info = extract_single_timestep_to_hdf5(
+                    source_hdf5=hdf5_file_path,
+                    output_path=light_hdf5_path,
+                    timestep_ms=light_timestep_ms
+                )
+                print(f"✅ Lightweight HDF5 created: {light_hdf5_path}")
+                print(f"   Single timestep: {light_info['timestep_ms']:.1f}ms")
+                print(f"   Size: {light_info['file_size_mb']:.1f}MB (portable for local point picking)")
+            except Exception as e:
+                print(f"⚠️  Lightweight HDF5 creation failed: {e}")
+                print(f"   Point picking will use full HDF5 instead")
+                light_timestep_ms = start_time if start_time is not None else 0.0
+
         except Exception as e:
             print(f"❌ HDF5 conversion failed: {e}")
             return
@@ -4160,8 +4251,13 @@ def main(overwrite_existing: bool = False,
         # Create interactive HTML
         print(f"\n🎨 Creating interactive HTML visualization...")
         try:
-            visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
-            print(f"   Using timestep: {display_timestep}ms (first file in breathing cycle)")
+            # Use the detected breathing cycle start time, or fallback to auto-detection
+            if start_time is not None:
+                display_timestep = int(start_time)
+                print(f"   Using timestep: {display_timestep}ms (start of breathing cycle)")
+            else:
+                visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
+                print(f"   Using timestep: {display_timestep}ms (first file in breathing cycle)")
 
             if Path(hdf5_file_path).exists():
                 plot_3d_interactive_all_patches(hdf5_file_path, [], subject_name, interactive_dir, time_point=display_timestep)
@@ -4172,22 +4268,65 @@ def main(overwrite_existing: bool = False,
         except Exception as e:
             print(f"❌ Failed to create interactive HTML: {e}")
 
-        # Create template tracking locations JSON (with remesh info if applicable)
-        print(f"\n📋 Creating template tracking locations file...")
+        # Create template tracking locations JSON (with remesh info if applicable) - LEGACY
+        print(f"\n📋 Creating template tracking locations file (legacy format)...")
         template_file = create_template_tracking_locations(subject_name, results_dir, remesh_info)
+
+        # Create split JSON files (new portable format)
+        print(f"\n📋 Creating split JSON files for portable workflow...")
+        try:
+            from utils.file_processing import create_metadata_json, create_picked_points_template
+
+            # Create metadata.json (system-generated, not user-editable)
+            metadata_path = create_metadata_json(
+                subject_name=subject_name,
+                output_dir=results_dir,
+                timestep_info=timestep_info,
+                breathing_cycle=breathing_cycle,
+                remesh_info=remesh_info,
+                light_hdf5_timestep_ms=light_timestep_ms
+            )
+
+            # Create picked_points.json (empty template for user to fill)
+            picked_points_path = create_picked_points_template(
+                subject_name=subject_name,
+                output_dir=results_dir,
+                timestep_ms=light_timestep_ms,
+                light_hdf5_filename=f"{subject_name}_cfd_data_light.h5"
+            )
+
+        except Exception as e:
+            print(f"⚠️  Failed to create split JSON files: {e}")
+            print(f"   Legacy tracking_locations.json will be used instead")
 
         print(f"\n" + "="*60)
         print("✅ PATCH SELECTION MODE COMPLETE")
         print("="*60)
-        print(f"\nNext steps:")
+        print(f"\nOutput files created in {results_dir}/:")
+        print(f"   📦 {subject_name}_cfd_data.h5           (Full HDF5 - all timesteps)")
+        print(f"   📦 {subject_name}_cfd_data_light.h5     (Light HDF5 - single timestep, portable)")
+        print(f"   📄 {subject_name}_metadata.json         (System metadata - do not edit)")
+        print(f"   📄 {subject_name}_picked_points.json    (Point picker template - EDIT THIS)")
+        print(f"   📄 {subject_name}_tracking_locations.json (Legacy format - backward compatible)")
+
+        print(f"\n🖥️  For LOCAL point picking (recommended for large datasets):")
+        print(f"1. Copy these files to your local machine:")
+        print(f"   - {subject_name}_cfd_data_light.h5")
+        print(f"   - {subject_name}_picked_points.json")
+        print(f"\n2. Run point picker locally:")
+        print(f"   python src/main.py --subject {subject_name} --point-picker --light-h5")
+        print(f"\n3. Copy {subject_name}_picked_points.json back to cluster")
+        print(f"\n4. Run Phase 2 on cluster:")
+        print(f"   python src/main.py --subject {subject_name} --plotting")
+
+        print(f"\n🖥️  For DIRECT editing (if interactive HTML works):")
         print(f"1. Open the interactive HTML in your browser:")
         print(f"   {interactive_dir}/{subject_name}_surface_patches_interactive_first_breathing_cycle_t{display_timestep}ms.html")
         print(f"\n2. Hover over points to identify Patch Number and Face Index")
-        print(f"\n3. Edit the template tracking locations file:")
-        print(f"   {template_file}")
-        print(f"\n4. Run Phase 2 (plotting mode) to generate analysis:")
+        print(f"\n3. Edit the picked_points.json file:")
+        print(f"   {results_dir}/{subject_name}_picked_points.json")
+        print(f"\n4. Run Phase 2:")
         print(f"   python src/main.py --subject {subject_name} --plotting")
-        print(f"   (Flow profile is embedded in HDF5 - no need to specify again)")
         print("="*60)
 
         return  # Exit early for patch-selection mode
@@ -4254,8 +4393,8 @@ def main(overwrite_existing: bool = False,
                 print(f"❌ No xyz_tables directory found for remesh processing")
                 return
 
-            # Load current tracking config
-            tracking_config = load_tracking_locations(subject_name=subject_name)
+            # Load current tracking config (supports both new split JSON and legacy format)
+            tracking_config = load_and_merge_configs(subject_name=subject_name, results_dir=results_dir)
 
             # Check if we have multiple remesh events
             if len(remesh_events_from_hdf5) > 1:
@@ -4275,12 +4414,25 @@ def main(overwrite_existing: bool = False,
                         tracking_config, remesh_events_from_hdf5, xyz_tables_dir
                     )
 
-                    # Save updated config
+                    # Save updated config (legacy format for backward compatibility)
                     results_dir = Path(f'{subject_name}_results')
                     updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
                     with open(updated_json_path, 'w') as f:
                         json.dump(updated_config, f, indent=2)
                     print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+
+                    # Also save post_remesh_mappings to metadata.json (new format)
+                    remesh_mappings = []
+                    for loc in updated_config.get('locations', []):
+                        if loc.get('post_remesh_list'):
+                            remesh_mappings.append({
+                                'location_id': loc.get('id', loc.get('description', 'unknown')),
+                                'original_patch': loc.get('patch_number'),
+                                'original_face': loc.get('face_indices', [None])[0],
+                                'mappings': loc['post_remesh_list']
+                            })
+                    if remesh_mappings:
+                        save_post_remesh_mappings(subject_name, remesh_mappings, results_dir)
             else:
                 # Single remesh event - use original function
                 # Determine remesh files: prefer HDF5 metadata, fall back to command line
@@ -4346,12 +4498,26 @@ def main(overwrite_existing: bool = False,
                         tracking_config, before_path, after_path
                     )
 
-                    # Save updated config
+                    # Save updated config (legacy format for backward compatibility)
                     results_dir = Path(f'{subject_name}_results')
                     updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
                     with open(updated_json_path, 'w') as f:
                         json.dump(updated_config, f, indent=2)
                     print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+
+                    # Also save post_remesh_mappings to metadata.json (new format)
+                    remesh_mappings = []
+                    for loc in updated_config.get('locations', []):
+                        post_remesh = loc.get('post_remesh') or (loc.get('post_remesh_list', [None])[0] if loc.get('post_remesh_list') else None)
+                        if post_remesh:
+                            remesh_mappings.append({
+                                'location_id': loc.get('id', loc.get('description', 'unknown')),
+                                'original_patch': loc.get('patch_number'),
+                                'original_face': loc.get('face_indices', [None])[0],
+                                'mappings': [post_remesh]
+                            })
+                    if remesh_mappings:
+                        save_post_remesh_mappings(subject_name, remesh_mappings, results_dir)
         else:
             print(f"   No remesh detected - using consistent patch/face indices")
 
@@ -4594,19 +4760,47 @@ def main(overwrite_existing: bool = False,
         print("\nProcessing tracking points...")
 
         # Get breathing cycle metadata for time normalization
+        # Priority: 1) metadata.json (allows user override), 2) HDF5, 3) flow profile
         from data_processing.trajectory import get_breathing_cycle_metadata
-        breathing_metadata = get_breathing_cycle_metadata(hdf5_file_path) if Path(hdf5_file_path).exists() else {}
-        start_time = breathing_metadata.get('breathing_cycle_start_ms', 0.0)
+        from utils.file_processing import load_metadata
 
-        # Fallback: get from flow profile if HDF5 metadata is missing
+        breathing_metadata = {}
+        start_time = 0.0
+        inhale_exhale_transition = None
+        end_time = None
+        breathing_source = None
+
+        # Priority 1: Check metadata.json for user override
+        metadata_json = load_metadata(subject_name, results_dir)
+        if metadata_json and 'breathing_cycle' in metadata_json:
+            bc = metadata_json['breathing_cycle']
+            if bc.get('start_time_ms') is not None:
+                start_time = bc['start_time_ms']
+                inhale_exhale_transition = bc.get('inhale_exhale_transition_ms')
+                end_time = bc.get('end_time_ms')
+                breathing_source = f"metadata.json (mode: {bc.get('mode', 'unknown')})"
+                print(f"📄 Using breathing cycle from {breathing_source}")
+
+        # Priority 2: Fall back to HDF5
+        if start_time == 0.0 and Path(hdf5_file_path).exists():
+            breathing_metadata = get_breathing_cycle_metadata(hdf5_file_path)
+            start_time = breathing_metadata.get('breathing_cycle_start_ms', 0.0)
+            inhale_exhale_transition = breathing_metadata.get('inhale_exhale_transition_ms')
+            end_time = breathing_metadata.get('breathing_cycle_end_ms')
+            if start_time > 0:
+                breathing_source = "HDF5 metadata"
+
+        # Priority 3: Fall back to flow profile calculation
         if start_time == 0.0 and flow_profile_path:
             bc_start, bc_end = find_breathing_cycle_bounds(subject_name, flow_profile_path)
             if bc_start is not None:
                 start_time = bc_start
+                end_time = bc_end
+                breathing_source = "flow profile"
                 print(f"📊 Using breathing cycle start from flow profile: {start_time:.2f}ms")
 
         if start_time > 0:
-            print(f"📊 Time normalization offset: {start_time:.2f}ms")
+            print(f"📊 Time normalization offset: {start_time:.2f}ms (source: {breathing_source})")
         else:
             print(f"⚠️  No breathing cycle metadata found - time normalization offset will be 0")
 
@@ -5481,8 +5675,18 @@ Examples (Two-Phase Workflow - Recommended):
   # Phase 1: Create HDF5 and interactive HTML for point selection
   python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
+  # Phase 1 with manual breathing cycle times (skips auto-detection prompt)
+  python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
+
   # Phase 2: Generate all analysis and plots (after updating tracking JSON)
   python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+
+Examples (Point Picker - For selecting anatomical landmarks):
+  # Launch point picker with lightweight H5 (fast, portable)
+  python src/main.py --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data_light.h5
+
+  # Launch point picker with full H5
+  python src/main.py --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
 
 Examples (Other Commands):
   python src/main.py --subject OSAMRI007                    # Full analysis (legacy)
@@ -5529,37 +5733,45 @@ Examples (Other Commands):
     parser.add_argument('--plotting', action='store_true',
                       help='Phase 2: Generate analysis and plots using existing HDF5 and tracking JSON')
 
-    # Required input files for production workflow
+    # Input files for production workflow
     parser.add_argument('--flow-profile', type=str,
-                      help='Path to breathing flow profile CSV file (required for --patch-selection and --plotting modes)')
+                      help='Path to breathing flow profile CSV file (optional for Phase 1 - will use CSV timestep if not provided)')
 
-    # Remesh handling arguments
+    # Breathing cycle manual override (all times in SECONDS)
+    parser.add_argument('--inhale-start', type=float, metavar='SEC',
+                      help='Manual override: Start of inhale in seconds (skips auto-detection)')
+    parser.add_argument('--transition', type=float, metavar='SEC',
+                      help='Manual override: Inhale-to-exhale transition in seconds')
+    parser.add_argument('--exhale-end', type=float, metavar='SEC',
+                      help='Manual override: End of exhale in seconds')
+
+    # Remesh handling arguments (now auto-detected, these flags are for manual override)
     parser.add_argument('--has-remesh', action='store_true',
-                      help='Indicate that CFD simulation has mesh remeshing during the run')
+                      help='Override auto-detection: indicate simulation has mesh remeshing')
     parser.add_argument('--remesh-before', type=str,
-                      help='CSV filename of last timestep BEFORE remesh (for coordinate mapping)')
+                      help='Override auto-detection: CSV filename of last timestep BEFORE remesh')
     parser.add_argument('--remesh-after', type=str,
-                      help='CSV filename of first timestep AFTER remesh (for coordinate mapping)')
+                      help='Override auto-detection: CSV filename of first timestep AFTER remesh')
     parser.add_argument('--point-picker', action='store_true',
                       help='Launch PyVista-based interactive point picker (fast VTK picking for large datasets)')
+    parser.add_argument('--h5-file', type=str,
+                      help='Specify HDF5 file path for point picker (e.g., OSAMRI007_results/OSAMRI007_cfd_data_light.h5)')
     parser.add_argument('--picker-timestep', type=int,
                       help='Specific timestep for point picker (optional, will prompt if not provided)')
 
     args = parser.parse_args()
 
-    # Validate --flow-profile requirement for production modes
+    # Validate --flow-profile for production modes (now optional for Phase 1)
     if getattr(args, 'patch_selection', False):
-        # Phase 1 always requires flow profile
-        if not args.flow_profile:
-            print("❌ ERROR: --flow-profile is required for --patch-selection mode")
-            print("   Example: python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile.csv")
-            sys.exit(1)
-        # Validate flow profile file exists
-        flow_profile_path = Path(args.flow_profile)
-        if not flow_profile_path.exists():
-            print(f"❌ ERROR: Flow profile file not found: {args.flow_profile}")
-            sys.exit(1)
-        print(f"✅ Using flow profile: {args.flow_profile}")
+        # Phase 1: flow profile is optional (will use Mode C if not provided)
+        if args.flow_profile:
+            flow_profile_path = Path(args.flow_profile)
+            if not flow_profile_path.exists():
+                print(f"❌ ERROR: Flow profile file not found: {args.flow_profile}")
+                sys.exit(1)
+            print(f"✅ Using flow profile: {args.flow_profile}")
+        else:
+            print("ℹ️  No flow profile provided - will use CSV timestep data for breathing cycle detection")
     elif getattr(args, 'plotting', False):
         # Phase 2: flow profile can come from HDF5 or command line
         if args.flow_profile:
@@ -5609,16 +5821,26 @@ Examples (Other Commands):
             print("   Run --patch-selection first to create HDF5 cache")
             sys.exit(1)
 
-        h5_file = results_dir / f"{args.subject}_cfd_data.h5"
-        if not h5_file.exists():
-            print(f"❌ ERROR: HDF5 cache not found: {h5_file}")
-            print("   Run --patch-selection first to create HDF5 cache")
-            sys.exit(1)
+        # Check for HDF5 file (custom path or default)
+        h5_file_arg = getattr(args, 'h5_file', None)
+        if h5_file_arg:
+            h5_file = Path(h5_file_arg)
+            if not h5_file.exists():
+                print(f"❌ ERROR: Specified HDF5 file not found: {h5_file}")
+                sys.exit(1)
+        else:
+            h5_file = results_dir / f"{args.subject}_cfd_data.h5"
+            if not h5_file.exists():
+                print(f"❌ ERROR: HDF5 cache not found: {h5_file}")
+                print("   Run --patch-selection first to create HDF5 cache")
+                sys.exit(1)
+
+        print(f"📦 Loading HDF5: {h5_file}")
 
         # Try Qt GUI first, fall back to simple picker
         try:
             from visualization.point_picker_gui import run_point_picker_gui
-            run_point_picker_gui(args.subject, args.picker_timestep, results_dir)
+            run_point_picker_gui(args.subject, args.picker_timestep, results_dir, h5_path=h5_file)
         except ImportError as e:
             print(f"⚠️ Qt GUI not available ({e}), using simple picker")
             from visualization.point_picker import run_point_picker

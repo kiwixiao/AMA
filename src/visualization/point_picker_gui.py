@@ -29,12 +29,34 @@ import sys
 class PointPickerGUI(QMainWindow):
     """Main GUI window for point picking."""
 
-    def __init__(self, subject_name: str, results_dir: Optional[Path] = None):
+    def __init__(self, subject_name: str, results_dir: Optional[Path] = None,
+                 h5_path: Optional[Path] = None, use_light_h5: bool = False):
         super().__init__()
         self.subject_name = subject_name
         self.results_dir = results_dir or Path(f"{subject_name}_results")
-        self.h5_path = self.results_dir / f"{subject_name}_cfd_data.h5"
-        self.tracking_json_path = self.results_dir / f"{subject_name}_tracking_locations.json"
+
+        # Determine H5 file path
+        if h5_path:
+            self.h5_path = Path(h5_path)
+        elif use_light_h5:
+            # Try lightweight H5 first
+            light_path = self.results_dir / f"{subject_name}_cfd_data_light.h5"
+            if light_path.exists():
+                self.h5_path = light_path
+                print(f"📦 Using lightweight HDF5: {light_path}")
+            else:
+                self.h5_path = self.results_dir / f"{subject_name}_cfd_data.h5"
+                print(f"⚠️  Lightweight H5 not found, using full: {self.h5_path}")
+        else:
+            self.h5_path = self.results_dir / f"{subject_name}_cfd_data.h5"
+
+        # Use picked_points.json if it exists, otherwise fall back to tracking_locations.json
+        picked_points_path = self.results_dir / f"{subject_name}_picked_points.json"
+        if picked_points_path.exists():
+            self.tracking_json_path = picked_points_path
+            print(f"📄 Using picked_points.json format")
+        else:
+            self.tracking_json_path = self.results_dir / f"{subject_name}_tracking_locations.json"
 
         # Data storage
         self.picked_points: List[Dict] = []
@@ -173,14 +195,26 @@ class PointPickerGUI(QMainWindow):
         """Load point cloud data for a specific timestep."""
         with h5py.File(self.h5_path, 'r') as f:
             if 'cfd_data' in f:
-                col_names = list(f.attrs.get('column_names', []))
+                # WSL-compatible column name decoding (handles bytes vs strings)
+                raw_col_names = f.attrs.get('column_names', [])
+                col_names = [
+                    (c.decode('utf-8') if isinstance(c, (bytes, bytearray)) else str(c)).strip('\x00')
+                    for c in raw_col_names
+                ]
+
                 x_idx = col_names.index('X (m)') if 'X (m)' in col_names else col_names.index('Position[X] (m)')
                 y_idx = col_names.index('Y (m)') if 'Y (m)' in col_names else col_names.index('Position[Y] (m)')
                 z_idx = col_names.index('Z (m)') if 'Z (m)' in col_names else col_names.index('Position[Z] (m)')
                 patch_idx = col_names.index('Patch Number') if 'Patch Number' in col_names else None
                 face_idx = col_names.index('Face Index') if 'Face Index' in col_names else None
 
-                data = f['cfd_data'][timestep_idx]
+                # Handle variable point counts per timestep
+                if 'point_counts' in f:
+                    n = int(f['point_counts'][timestep_idx])
+                    data = f['cfd_data'][timestep_idx, :n, :]
+                else:
+                    data = f['cfd_data'][timestep_idx]
+
                 x, y, z = data[:, x_idx], data[:, y_idx], data[:, z_idx]
                 points = np.column_stack([x, y, z])
 
@@ -500,14 +534,15 @@ class PointPickerGUI(QMainWindow):
 
 
 def run_point_picker_gui(subject_name: str, timestep: Optional[int] = None,
-                         results_dir: Optional[Path] = None):
+                         results_dir: Optional[Path] = None,
+                         use_light_h5: bool = False, h5_path: Optional[Path] = None):
     """Run the Qt-based point picker GUI."""
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
 
     # Create main window
-    window = PointPickerGUI(subject_name, results_dir)
+    window = PointPickerGUI(subject_name, results_dir, h5_path=h5_path, use_light_h5=use_light_h5)
 
     # Load timesteps
     timesteps = window.load_available_timesteps()

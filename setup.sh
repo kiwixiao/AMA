@@ -90,6 +90,7 @@ modules = [
     ('h5py', 'HDF5'),
     ('sklearn', 'scikit-learn'),
     ('pyvista', 'PyVista'),
+    ('pyvistaqt', 'PyVistaQt'),
 ]
 all_ok = True
 for module, name in modules:

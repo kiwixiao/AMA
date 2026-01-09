@@ -3,8 +3,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  # Python version (pinned to stable release - 3.14 breaks pyvista)
+  - python>=3.9,<3.13
+
   # Core scientific computing
-  - python>=3.9
   - numpy>=1.21.0
   - pandas>=1.3.0
   - scipy>=1.7.0
@@ -14,31 +16,25 @@ dependencies:
   - plotly>=5.3.0
   - seaborn>=0.11.0
 
+  # 3D visualization
+  - pyvista>=0.32.0
+  - pyvistaqt>=0.9.0
+  - vtk>=9.0.0
+
   # Data processing and I/O
   - h5py>=3.1.0
   - pytables>=3.6.1
   - tqdm>=4.65.0
 
-  # Machine learning and clustering
+  # Machine learning
   - scikit-learn>=1.0.0
 
   # System monitoring
   - psutil>=5.8.0
 
-  # Optional but recommended for 3D visualization
-  - pyvista>=0.32.0
-  - vtk>=9.0.0
+  # Web dashboard (for interactive visualization)
+  - dash>=2.0.0
+  - dash-bootstrap-components>=1.0.0
 
-  # Development and testing
-  - pytest>=6.0.0
-  - jupyter>=1.0.0
-
-  # Performance optimization
-  - numba>=0.56.0
-
-  # Additional system packages
+  # pip for additional packages
   - pip
-
-  # Install additional packages via pip
-  - pip:
-    - pathlib>=1.0.1 

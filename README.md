@@ -78,21 +78,50 @@ project_root/
 ```
 project_root/
 ├── {SUBJECT}_xyz_tables_with_patches/       # Processed CFD data with patch numbers
-├── {SUBJECT}_cfd_data.h5                    # HDF5 cache (85% size reduction)
-├── {SUBJECT}_results/                       # Analysis results
-│   ├── tracked_points/                      # CSV trajectory data
-│   ├── figures/                             # PNG images
-│   ├── reports/                             # PDF analysis reports
-│   └── interactive/                         # HTML visualizations
-└── {SUBJECT}_tracking_locations.json        # Updated landmark coordinates
+└── {SUBJECT}_results/                       # All results (self-contained folder)
+    ├── {SUBJECT}_cfd_data.h5                # HDF5 cache (85% size reduction)
+    ├── {SUBJECT}_tracking_locations.json    # Tracking locations (editable)
+    ├── tracked_points/                      # CSV trajectory data
+    ├── figures/                             # PNG images
+    ├── reports/                             # PDF analysis reports
+    └── interactive/                         # HTML visualizations
 ```
 
 ## 🎯 Usage
 
-### Quick Start
+### Two-Phase Workflow (Recommended)
+
+The pipeline uses a two-phase workflow for better control and manual verification:
+
+#### Phase 1: Patch Selection
+```bash
+# Convert CSV to HDF5 and create interactive visualization for point selection
+python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+```
+
+This phase:
+- Converts raw CSV files to HDF5 format (85% size reduction)
+- Detects breathing cycle from flow profile
+- Creates interactive HTML visualization for manual patch/face selection
+- Generates template tracking locations JSON file in `{SUBJECT}_results/`
+
+After Phase 1, open the interactive HTML and update `{SUBJECT}_results/{SUBJECT}_tracking_locations.json` with the correct patch numbers and face indices.
+
+#### Phase 2: Plotting and Analysis
+```bash
+# Generate all analysis and plots using the updated tracking locations
+python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+```
+
+This phase:
+- Reads HDF5 file (skips CSV processing)
+- Loads tracking locations from results folder
+- Generates all analysis, tracking, and visualization outputs
+
+### Quick Start (Legacy Mode)
 
 ```bash
-# Complete analysis for a subject
+# Complete analysis for a subject (requires pre-configured tracking locations)
 python src/main.py --subject OSAMRI007
 
 # Force complete rerun (overwrite existing data)
@@ -119,6 +148,9 @@ python src/main.py --subject OSAMRI007 --disablevisualization
 
 # Highlight patch regions only (quick visualization)
 python src/main.py --subject OSAMRI007 --highlight-patches --patch-timestep 100
+
+# Handle remeshed data (when mesh changes during simulation)
+python src/main.py --subject OSAMRI007 --has-remesh --remesh-before file1.csv --remesh-after file2.csv
 ```
 
 ### Batch Processing
@@ -134,20 +166,41 @@ done
 
 ### Tracking Locations
 
-Edit `{SUBJECT}_tracking_locations.json` to define anatomical landmarks:
+The pipeline automatically generates a template tracking locations file during Phase 1 (`--patch-selection`).
+Edit `{SUBJECT}_results/{SUBJECT}_tracking_locations.json` to define anatomical landmarks:
 
 ```json
 {
   "locations": [
     {
-      "name": "Posterior border of soft palate",
+      "description": "Posterior border of soft palate",
       "patch_number": 17,
-      "face_index": 12220,
+      "face_indices": [12220],
       "coordinates": [-0.0101, 0.0081, 0.0386]
+    },
+    {
+      "description": "Back of tongue",
+      "patch_number": 25,
+      "face_indices": [8450],
+      "coordinates": [-0.0085, 0.0120, 0.0290]
     }
-  ]
+  ],
+  "combinations": [],
+  "_instructions": {
+    "step1": "Open the interactive HTML visualization in your browser",
+    "step2": "Hover over points to see Patch Number and Face Index",
+    "step3": "Update each location's patch_number, face_indices, and coordinates",
+    "step4": "Update the description to something meaningful",
+    "step5": "Run the pipeline again with --plotting to generate analysis"
+  }
 }
 ```
+
+**How to find patch/face values:**
+1. Run Phase 1 to generate the interactive HTML
+2. Open `{SUBJECT}_results/interactive/{SUBJECT}_surface_patches_interactive_first_breathing_cycle_t{time}ms.html`
+3. Hover over points to see Patch Number and Face Index
+4. Update the JSON file with the values for your anatomical landmarks
 
 ### Performance Tuning
 
@@ -160,19 +213,32 @@ The pipeline automatically detects optimal settings:
 
 ### Data Files
 - **CSV trajectories**: `{SUBJECT}_results/tracked_points/`
-- **HDF5 cache**: `{SUBJECT}_cfd_data.h5` (compressed, fast access)
-- **Key time points**: `{SUBJECT}_key_time_points.json`
+- **HDF5 cache**: `{SUBJECT}_results/{SUBJECT}_cfd_data.h5` (compressed, fast access)
+- **Key time points**: `{SUBJECT}_results/{SUBJECT}_key_time_points.json`
+- **Tracking locations**: `{SUBJECT}_results/{SUBJECT}_tracking_locations.json`
 
 ### Visualizations
-- **PDF reports**: Comprehensive analysis with plots and statistics
-- **Interactive HTML**: 3D visualizations with patch regions
-- **PNG figures**: Individual plots for presentations
+- **Interactive HTML**:
+  - `{SUBJECT}_surface_patches_interactive_first_breathing_cycle_t{time}ms.html` - Full surface with patch selection
+  - `{SUBJECT}_patch_regions_t{time}ms.html` - Highlighted patch regions
+- **PNG figures**: Individual plots in `{SUBJECT}_results/figures/`
 
-### Analysis Reports
-- **Pressure-velocity correlations**: Cross-correlation analysis
-- **Surface velocity analysis**: Airway wall motion patterns  
-- **Patch region analysis**: Multi-radius anatomical region tracking
-- **Temporal analysis**: Breathing cycle dynamics
+### PDF Reports (`{SUBJECT}_results/reports/`)
+- **3x3 Panel Analysis** (pressure, velocity, acceleration correlations):
+  - `{SUBJECT}_3x3_panel_smoothed_with_markers_normalized_time.pdf` - Time starts at 0s
+  - `{SUBJECT}_3x3_panel_smoothed_with_markers_original_time.pdf` - Original timestamps for traceability
+  - `{SUBJECT}_3x3_panel_clean.pdf` - Clean version without markers
+  - `{SUBJECT}_3x3_panel_smooth.pdf` - Smoothed version
+- **Correlation Analysis**:
+  - `{SUBJECT}_pressure_motion_correlation_50ms.pdf` - 50ms window
+  - `{SUBJECT}_pressure_motion_correlation_100ms.pdf` - 100ms window
+- **CFD Analysis**:
+  - `{SUBJECT}_cfd_analysis.pdf` - Comprehensive CFD analysis
+  - `{SUBJECT}_cfd_analysis_3x3.pdf` - Multi-page 3x3 panels
+  - `{SUBJECT}_cfd_analysis_3x3_with_markers.pdf` - With zero-crossing markers
+- **Other**:
+  - `{SUBJECT}_airway_surface_velocity.pdf` - Surface velocity analysis
+  - `{SUBJECT}_clean_flow_profile.pdf` - Breathing flow profile
 
 ## ⚡ Performance
 
@@ -214,8 +280,8 @@ chmod -R 755 .
 
 **4. HDF5 lock errors:**
 ```bash
-# Remove locked files
-rm -f *_cfd_data.h5
+# Remove locked files from results folder
+rm -f OSAMRI007_results/OSAMRI007_cfd_data.h5
 python src/main.py --subject OSAMRI007 --forcererun
 ```
 

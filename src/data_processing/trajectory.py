@@ -1218,4 +1218,124 @@ def get_hdf5_first_time_point(hdf5_file_path: str) -> float:
             return times[0]
     except Exception as e:
         print(f"❌ Error getting first time point from HDF5: {e}")
-        return None 
+        return None
+
+
+def extract_single_timestep_to_hdf5(source_hdf5: str, output_path: str, timestep_ms: float) -> dict:
+    """
+    Extract a single timestep from full HDF5 to create a lightweight file.
+
+    This creates a portable HDF5 file containing only one timestep,
+    suitable for local point picking without transferring the full dataset.
+
+    Args:
+        source_hdf5: Path to the full HDF5 file
+        output_path: Path for the lightweight output HDF5
+        timestep_ms: Timestep to extract (in milliseconds)
+
+    Returns:
+        dict with:
+            'success': bool
+            'output_path': str
+            'timestep_ms': float
+            'actual_time_s': float
+            'n_points': int
+            'file_size_mb': float
+    """
+    import h5py
+    import numpy as np
+    from pathlib import Path
+
+    result = {
+        'success': False,
+        'output_path': output_path,
+        'timestep_ms': timestep_ms,
+        'actual_time_s': None,
+        'n_points': 0,
+        'file_size_mb': 0.0
+    }
+
+    try:
+        with h5py.File(source_hdf5, 'r') as src:
+            # Get time points
+            if 'time_points' in src:
+                times = src['time_points'][:]
+            elif 'times' in src:
+                times = src['times'][:]
+            else:
+                print(f"❌ No time data found in source HDF5")
+                return result
+
+            # Find closest time point to requested timestep
+            target_time_s = timestep_ms / 1000.0
+            time_diffs = np.abs(times - target_time_s)
+            time_idx = np.argmin(time_diffs)
+            actual_time_s = times[time_idx]
+
+            print(f"📊 Extracting timestep {timestep_ms}ms (actual: {actual_time_s*1000:.1f}ms, index {time_idx})")
+
+            # Get data array
+            if 'cfd_data' in src:
+                data = src['cfd_data']
+            elif 'data' in src:
+                data = src['data']
+            else:
+                print(f"❌ No data array found in source HDF5")
+                return result
+
+            # Extract single timestep data
+            single_timestep_data = data[time_idx, :, :]
+
+            # Count valid points (non-NaN)
+            valid_mask = ~np.isnan(single_timestep_data[:, 0])
+            n_valid_points = np.sum(valid_mask)
+
+            # Get column names
+            column_names = None
+            if 'column_names' in src.attrs:
+                column_names = src.attrs['column_names']
+            elif 'properties' in src.attrs:
+                column_names = src.attrs['properties']
+
+            # Create lightweight HDF5
+            with h5py.File(output_path, 'w') as dst:
+                # Store single timestep data (keep 3D shape for compatibility: 1 x n_points x n_properties)
+                dst.create_dataset('cfd_data', data=single_timestep_data[np.newaxis, :, :], dtype='float64')
+                dst.create_dataset('time_points', data=np.array([actual_time_s]), dtype='float64')
+                dst.create_dataset('point_counts', data=np.array([n_valid_points]), dtype='int64')
+
+                # Copy column names
+                if column_names is not None:
+                    dst.attrs['column_names'] = column_names
+                    dst.attrs['properties'] = column_names  # Backward compat
+
+                # Mark as lightweight
+                dst.attrs['is_lightweight'] = True
+                dst.attrs['source_file'] = str(source_hdf5)
+                dst.attrs['extracted_timestep_ms'] = timestep_ms
+                dst.attrs['actual_timestep_ms'] = actual_time_s * 1000
+
+                # Copy breathing cycle metadata if present
+                for attr in ['breathing_cycle_start_ms', 'breathing_cycle_end_ms']:
+                    if attr in src.attrs:
+                        dst.attrs[attr] = src.attrs[attr]
+
+            # Get output file size
+            file_size_mb = Path(output_path).stat().st_size / (1024 * 1024)
+
+            result['success'] = True
+            result['actual_time_s'] = actual_time_s
+            result['n_points'] = int(n_valid_points)
+            result['file_size_mb'] = file_size_mb
+
+            print(f"✅ Created lightweight HDF5: {output_path}")
+            print(f"   Points: {n_valid_points:,}")
+            print(f"   Size: {file_size_mb:.2f} MB")
+
+            return result
+
+    except Exception as e:
+        print(f"❌ Error extracting timestep to lightweight HDF5: {e}")
+        import traceback
+        traceback.print_exc()
+        return result

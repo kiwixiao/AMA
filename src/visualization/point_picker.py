@@ -87,8 +87,12 @@ class PointPicker:
         with h5py.File(self.h5_path, 'r') as f:
             if 'cfd_data' in f:
                 # New format: cfd_data[timestep, point, column]
-                # Get column names from attributes
-                col_names = list(f.attrs.get('column_names', []))
+                # WSL-compatible column name decoding (handles bytes vs strings)
+                raw_col_names = f.attrs.get('column_names', [])
+                col_names = [
+                    (c.decode('utf-8') if isinstance(c, (bytes, bytearray)) else str(c)).strip('\x00')
+                    for c in raw_col_names
+                ]
 
                 # Find column indices
                 x_idx = col_names.index('X (m)') if 'X (m)' in col_names else col_names.index('Position[X] (m)')
@@ -97,7 +101,12 @@ class PointPicker:
                 patch_idx = col_names.index('Patch Number') if 'Patch Number' in col_names else None
                 face_idx = col_names.index('Face Index') if 'Face Index' in col_names else None
 
-                data = f['cfd_data'][timestep_idx]  # Shape: (points, columns)
+                # Handle variable point counts per timestep
+                if 'point_counts' in f:
+                    n = int(f['point_counts'][timestep_idx])
+                    data = f['cfd_data'][timestep_idx, :n, :]
+                else:
+                    data = f['cfd_data'][timestep_idx]
 
                 x = data[:, x_idx]
                 y = data[:, y_idx]
