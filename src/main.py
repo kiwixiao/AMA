@@ -3846,6 +3846,7 @@ def main(overwrite_existing: bool = False,
          enable_patch_visualization: bool = True,
          subject_name: str = None,
          raw_dir: str = None,
+         xyz_path: str = None,
          highlight_patches: bool = False,
          patch_timestep: int = 100,
          raw_surface: bool = False,
@@ -4092,14 +4093,29 @@ def main(overwrite_existing: bool = False,
         print(f"\n📁 Created results directory structure: {results_dir}")
 
         # Find raw CSV files
-        raw_xyz_dir = Path(raw_dir) if raw_dir else Path(f'{subject_name}_xyz_tables')
-        if not raw_xyz_dir.exists():
-            # Try patched directory
-            raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+        # Priority: xyz_path > raw_dir > default ({subject}_xyz_tables)
+        if xyz_path:
+            raw_xyz_dir = Path(xyz_path)
+            if not raw_xyz_dir.exists():
+                print(f"❌ XYZ path does not exist: {xyz_path}")
+                return
+            print(f"📁 Using custom XYZ path: {xyz_path}")
+        elif raw_dir:
+            raw_xyz_dir = Path(raw_dir)
+            if not raw_xyz_dir.exists():
+                # Try patched directory
+                raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+        else:
+            raw_xyz_dir = Path(f'{subject_name}_xyz_tables')
+            if not raw_xyz_dir.exists():
+                # Try patched directory
+                raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
 
         if not raw_xyz_dir.exists():
             print(f"❌ No XYZ directory found for {subject_name}")
             print(f"   Expected: {subject_name}_xyz_tables or {subject_name}_xyz_tables_with_patches")
+            if xyz_path:
+                print(f"   Or custom path: {xyz_path}")
             return
 
         xyz_files = list(raw_xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
@@ -4396,7 +4412,9 @@ def main(overwrite_existing: bool = False,
             from utils.file_processing import update_tracking_locations_for_remesh, update_tracking_locations_for_multiple_remesh
 
             # Find xyz_tables directory
+            # Priority: xyz_path > patched > default > raw_dir
             xyz_dirs = [
+                Path(xyz_path) if xyz_path else None,
                 Path(f'{subject_name}_xyz_tables_with_patches'),
                 Path(f'{subject_name}_xyz_tables'),
                 Path(raw_dir) if raw_dir else None
@@ -4669,9 +4687,13 @@ def main(overwrite_existing: bool = False,
             if not xyz_files:
                 print(f"No patched XYZ table files found in {xyz_dir}")
                 print("Looking for raw XYZ table files...")
-                
+
                 # Determine raw directory name
-                if raw_dir is not None:
+                # Priority: xyz_path > raw_dir > default ({subject}_xyz_tables)
+                if xyz_path is not None:
+                    raw_xyz_dir = Path(xyz_path)
+                    print(f"📁 Using custom XYZ path: {xyz_path}")
+                elif raw_dir is not None:
                     raw_xyz_dir = Path(raw_dir)
                     print(f"Using custom raw directory: {raw_dir}")
                 else:
@@ -5703,6 +5725,17 @@ Examples (Point Picker - For selecting anatomical landmarks):
   # Launch point picker with full H5
   python src/main.py --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
 
+Examples (Custom XYZ Path - Data stored elsewhere):
+  # Phase 1 with custom XYZ path (results still saved to ./OSAMRI007_results/)
+  python src/main.py --subject OSAMRI007 --patch-selection \\
+      --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
+      --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
+
+  # Phase 2 with custom XYZ path
+  python src/main.py --subject OSAMRI007 --plotting \\
+      --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
+      --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
+
 Examples (Other Commands):
   python src/main.py --subject OSAMRI007                    # Full analysis (legacy)
   python src/main.py --subject OSAMRI007 --forcererun      # Force complete rerun
@@ -5715,6 +5748,8 @@ Examples (Other Commands):
                       help='Subject name to process (default: auto-detect from existing folders)')
     parser.add_argument('--rawdir', type=str,
                       help='Custom raw data directory name (default: {subject}_xyz_tables). Use this to specify a different raw data directory like "qDNS_xyz_tables".')
+    parser.add_argument('--xyz-path', type=str, dest='xyz_path',
+                      help='Full path to XYZ tables directory (absolute or relative). Takes priority over --rawdir. Results still saved to {subject}_results/ in current directory.')
     parser.add_argument('--forcererun', action='store_true', 
                       help='Force reprocessing of all tracked points, overwriting existing data')
     parser.add_argument('--disablepatchanalysis', action='store_true',
@@ -5874,6 +5909,7 @@ Examples (Other Commands):
          enable_patch_visualization=not args.disablevisualization,
          subject_name=args.subject,
          raw_dir=args.rawdir,
+         xyz_path=getattr(args, 'xyz_path', None),
          highlight_patches=getattr(args, 'highlight_patches', False),
          patch_timestep=getattr(args, 'patch_timestep', 100),
          raw_surface=getattr(args, 'raw_surface', False),
