@@ -3875,15 +3875,25 @@ def main(overwrite_existing: bool = False,
         subject_name = auto_detect_subject()
     else:
         # Validate provided subject name
-        available_subjects = detect_available_subjects()
-        if subject_name not in available_subjects:
-            print(f"❌ Subject '{subject_name}' not found!")
-            if available_subjects:
-                print(f"Available subjects: {available_subjects}")
+        if xyz_path:
+            # When xyz_path is provided, check if subject string is in the path
+            if subject_name not in xyz_path:
+                print(f"⚠️  Warning: Subject '{subject_name}' not found in path '{xyz_path}'")
+                print(f"   Proceeding anyway - ensure this is intentional")
             else:
-                print("No subjects detected in current directory.")
-            raise ValueError(f"Subject '{subject_name}' not found")
-        print(f"✅ Using specified subject: {subject_name}")
+                print(f"✅ Using subject '{subject_name}' with XYZ path: {xyz_path}")
+        else:
+            # Check local folders for subject
+            available_subjects = detect_available_subjects()
+            if subject_name not in available_subjects:
+                print(f"❌ Subject '{subject_name}' not found!")
+                if available_subjects:
+                    print(f"Available subjects: {available_subjects}")
+                else:
+                    print("No subjects detected in current directory.")
+                print(f"💡 Tip: Use --xyz-path to specify XYZ tables location if data is elsewhere")
+                raise ValueError(f"Subject '{subject_name}' not found")
+            print(f"✅ Using specified subject: {subject_name}")
     
     print(f"\n🎯 Processing subject: {subject_name}")
     base_subject = extract_base_subject(subject_name)
