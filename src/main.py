@@ -90,6 +90,8 @@ try:
     from visualization.cfd_analysis_3x3 import (
         create_cfd_analysis_3x3_panel,
         create_cfd_analysis_3x3_panel_with_markers,
+        create_cfd_analysis_3x3_panel_original_scale,
+        create_cfd_analysis_3x3_panel_with_markers_original_scale,
         load_cfd_data_for_analysis
     )
     CFD_ANALYSIS_AVAILABLE = True
@@ -97,137 +99,8 @@ except ImportError as e:
     print(f"Warning: Could not import CFD analysis functions: {e}")
     CFD_ANALYSIS_AVAILABLE = False
 
-
-def smart_label_position(ax, target_xy, text, existing_labels, data_points=None, 
-                        margin_factor=0.08, min_distance=0.15):
-    """
-    Zone-based label positioning that guarantees no overlaps by using the entire plot area.
-    
-    Args:
-        ax: matplotlib axis object
-        target_xy: (x, y) tuple of the target point to annotate
-        text: the text to display
-        existing_labels: list of existing label positions [(x, y), ...]
-        data_points: optional array of data points to avoid (less important now)
-        margin_factor: fraction of plot range to use as margin from edges
-        min_distance: minimum distance between labels (fraction of plot range)
-    
-    Returns:
-        (xytext, ha, va): position and alignment for the label
-    """
-    x_target, y_target = target_xy
-    
-    # Get plot boundaries
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    x_range = xlim[1] - xlim[0]
-    y_range = ylim[1] - ylim[0]
-    
-    # Calculate margins and minimum distance
-    x_margin = margin_factor * x_range
-    y_margin = margin_factor * y_range
-    min_dist = min_distance * min(x_range, y_range)
-    
-    # Estimate text bounding box for the larger font size
-    font_size = 11  # Increased by 20% from 9 to ~11
-    char_width = font_size * 0.6
-    char_height = font_size * 1.2
-    text_width = len(text) * char_width
-    text_height = char_height
-    
-    # Convert text dimensions to data coordinates
-    text_width_data = text_width * x_range / 800
-    text_height_data = text_height * y_range / 600
-    
-    # Define strategic zones across the entire plot area
-    # Use 6x4 grid of zones to distribute labels evenly
-    zones = []
-    n_cols = 6
-    n_rows = 4
-    
-    for row in range(n_rows):
-        for col in range(n_cols):
-            # Calculate zone center
-            zone_x = xlim[0] + x_margin + (col + 0.5) * (x_range - 2*x_margin) / n_cols
-            zone_y = ylim[0] + y_margin + (row + 0.5) * (y_range - 2*y_margin) / n_rows
-            
-            # Determine alignment based on zone position
-            if col < n_cols // 3:
-                ha = 'left'
-            elif col >= 2 * n_cols // 3:
-                ha = 'right'
-            else:
-                ha = 'center'
-                
-            if row < n_rows // 2:
-                va = 'bottom'
-            else:
-                va = 'top'
-            
-            # Calculate priority based on distance to target (closer zones preferred)
-            distance_to_target = np.sqrt((zone_x - x_target)**2 + (zone_y - y_target)**2)
-            
-            zones.append({
-                'x': zone_x,
-                'y': zone_y,
-                'ha': ha,
-                'va': va,
-                'priority': distance_to_target
-            })
-    
-    # Sort zones by priority (closer to target first, but we'll use any available zone)
-    zones.sort(key=lambda z: z['priority'])
-    
-    def is_zone_available(zone):
-        x, y, ha, va = zone['x'], zone['y'], zone['ha'], zone['va']
-        
-        # Calculate actual text bounds
-        if ha == 'left':
-            text_x_min, text_x_max = x, x + text_width_data
-        elif ha == 'right':
-            text_x_min, text_x_max = x - text_width_data, x
-        else:  # center
-            text_x_min, text_x_max = x - text_width_data/2, x + text_width_data/2
-            
-        if va == 'bottom':
-            text_y_min, text_y_max = y, y + text_height_data
-        elif va == 'top':
-            text_y_min, text_y_max = y - text_height_data, y
-        else:  # center
-            text_y_min, text_y_max = y - text_height_data/2, y + text_height_data/2
-        
-        # Check boundaries
-        if (text_x_min < xlim[0] + x_margin or text_x_max > xlim[1] - x_margin or 
-            text_y_min < ylim[0] + y_margin or text_y_max > ylim[1] - y_margin):
-            return False
-        
-        # Check distance from existing labels - this is the critical part for no overlaps
-        for existing_x, existing_y in existing_labels:
-            distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
-            if distance < min_dist:
-                return False
-        
-        return True
-    
-    # Try zones in order until we find an available one
-    for zone in zones:
-        if is_zone_available(zone):
-            return (zone['x'], zone['y']), zone['ha'], zone['va']
-    
-    # If all zones are somehow occupied (very unlikely with 24 zones), 
-    # use a fallback position at the edge
-    fallback_x = xlim[1] - x_margin - text_width_data/2
-    fallback_y = ylim[1] - y_margin - text_height_data/2
-    return (fallback_x, fallback_y), 'right', 'top'
-
-
-def format_time_label(time_value):
-    """Format time values to remove unnecessary decimal places."""
-    if time_value == int(time_value):
-        return f"{int(time_value)}s"
-    else:
-        # Remove trailing zeros and unnecessary decimal places
-        return f"{time_value:.2f}s".rstrip('0').rstrip('.')
+# Import shared utilities
+from utils.signal_processing import find_zero_crossings, smart_label_position, format_time_label
 
 
 def calculate_surface_normal(points: np.ndarray, center_idx: int, k: int = 10) -> np.ndarray:
@@ -3051,35 +2924,6 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     plt.close()
     print("Smoothed symmetric comparison panel with markers completed.")
 
-# Helper function to find zero-crossings with interpolation for more precise times
-def find_zero_crossings(times, values):
-    """Find the times when values cross zero.
-    
-    Args:
-        times: Array of time points
-        values: Array of values corresponding to time points
-        
-    Returns:
-        List of times when values cross zero
-    """
-    # Find indices where the value changes sign
-    zero_crossings = np.where(np.diff(np.signbit(values)))[0]
-    crossing_times = []
-    
-    for idx in zero_crossings:
-        # For each zero crossing, interpolate to find a more precise time
-        if idx + 1 < len(times) and idx >= 0:
-            t0, t1 = times[idx], times[idx + 1]
-            v0, v1 = values[idx], values[idx + 1]
-            
-            # Linear interpolation to find t where v = 0
-            # v = v0 + (v1-v0)*(t-t0)/(t1-t0) = 0
-            # Solve for t: t = t0 - v0 * (t1-t0)/(v1-v0)
-            if v1 != v0:  # Avoid division by zero
-                t_cross = t0 - v0 * (t1 - t0) / (v1 - v0)
-                crossing_times.append(t_cross)
-    
-    return crossing_times
 
 def create_airway_surface_analysis_plot(df, subject_name, description, patch_number, face_index, pdf, output_dir=None, smoothing_window=20):
     """Create a plot showing analysis for a single point, including pressure vs velocity/acceleration relationships."""
@@ -3762,7 +3606,7 @@ def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str
                     if len(time_points) > 0:
                         # First time point in HDF5 is already filtered to breathing cycle
                         first_time_s = time_points[0]
-                        display_timestep = int(first_time_s * 1000)  # Convert to ms
+                        display_timestep = round(first_time_s * 1000)  # Convert to ms
                         print(f"🎯 Auto-detected timestep {display_timestep}ms from HDF5 (first in breathing cycle)")
                         return first_time_s * 1000, display_timestep  # Return in ms for consistency
         except Exception as e:
@@ -3813,10 +3657,10 @@ def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str
             # Convert to milliseconds for display message only
             if 'e+' in first_file.stem or 'e-' in first_file.stem:
                 # Scientific notation - likely in seconds
-                display_timestep = int(visualization_timestep * 1000)
+                display_timestep = round(visualization_timestep * 1000)
             else:
                 # Likely already in milliseconds
-                display_timestep = int(visualization_timestep)
+                display_timestep = round(visualization_timestep)
 
             print(f"🎯 Auto-detected timestep {display_timestep}ms for visualization (first file in breathing cycle)")
             return visualization_timestep, display_timestep
@@ -3832,9 +3676,9 @@ def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str
 
     # Convert to milliseconds for display message only
     if 'e+' in first_file.stem or 'e-' in first_file.stem:
-        display_timestep = int(first_timestep * 1000)
+        display_timestep = round(first_timestep * 1000)
     else:
-        display_timestep = int(first_timestep)
+        display_timestep = round(first_timestep)
     
     print(f"🎯 Auto-detected timestep {display_timestep}ms for visualization (first available file)")
     return visualization_timestep, display_timestep
@@ -3883,17 +3727,32 @@ def main(overwrite_existing: bool = False,
             else:
                 print(f"✅ Using subject '{subject_name}' with XYZ path: {xyz_path}")
         else:
-            # Check local folders for subject
-            available_subjects = detect_available_subjects()
-            if subject_name not in available_subjects:
-                print(f"❌ Subject '{subject_name}' not found!")
-                if available_subjects:
-                    print(f"Available subjects: {available_subjects}")
+            # For plotting mode, only need results folder with HDF5 - don't require XYZ tables
+            if plotting_mode:
+                results_dir = Path(f"{subject_name}_results")
+                hdf5_file = results_dir / f"{subject_name}_cfd_data.h5"
+                if results_dir.exists() and hdf5_file.exists():
+                    print(f"✅ Using subject '{subject_name}' (plotting mode - HDF5 found)")
                 else:
-                    print("No subjects detected in current directory.")
-                print(f"💡 Tip: Use --xyz-path to specify XYZ tables location if data is elsewhere")
-                raise ValueError(f"Subject '{subject_name}' not found")
-            print(f"✅ Using specified subject: {subject_name}")
+                    print(f"❌ Subject '{subject_name}' not found for plotting mode!")
+                    if not results_dir.exists():
+                        print(f"   Missing results folder: {results_dir}")
+                    elif not hdf5_file.exists():
+                        print(f"   Missing HDF5 file: {hdf5_file}")
+                    print(f"💡 Tip: Run Phase 1 first to create the HDF5 file")
+                    raise ValueError(f"Subject '{subject_name}' not found")
+            else:
+                # Check local folders for subject (requires XYZ tables)
+                available_subjects = detect_available_subjects()
+                if subject_name not in available_subjects:
+                    print(f"❌ Subject '{subject_name}' not found!")
+                    if available_subjects:
+                        print(f"Available subjects: {available_subjects}")
+                    else:
+                        print("No subjects detected in current directory.")
+                    print(f"💡 Tip: Use --xyz-path to specify XYZ tables location if data is elsewhere")
+                    raise ValueError(f"Subject '{subject_name}' not found")
+                print(f"✅ Using specified subject: {subject_name}")
     
     print(f"\n🎯 Processing subject: {subject_name}")
     base_subject = extract_base_subject(subject_name)
@@ -4085,7 +3944,6 @@ def main(overwrite_existing: bool = False,
         from utils.file_processing import (
             find_flow_profile_file,
             validate_subject_files,
-            create_template_tracking_locations,
             ask_remesh_questions_interactive,
             detect_timestep_from_csv,
             detect_remesh_from_file_sizes,
@@ -4171,12 +4029,14 @@ def main(overwrite_existing: bool = False,
                     before_file = event.get('before_file')
                     after_file = event.get('after_file')
                     if before_file:
-                        print(f"    Before: {before_file.name if hasattr(before_file, 'name') else before_file} ({event.get('before_size', 0):,} bytes)")
+                        before_name = Path(before_file).name if isinstance(before_file, str) else before_file.name
+                        print(f"    Before: {before_name} ({event.get('before_size', 0):,} bytes)")
                     if after_file:
-                        print(f"    After:  {after_file.name if hasattr(after_file, 'name') else after_file} ({event.get('after_size', 0):,} bytes)")
+                        after_name = Path(after_file).name if isinstance(after_file, str) else after_file.name
+                        print(f"    After:  {after_name} ({event.get('after_size', 0):,} bytes)")
                     print(f"    Size change: {event.get('size_change_percent', 0):+.1f}%")
 
-                # Convert to remesh_info format for compatibility (safe access with .get())
+                # Convert to remesh_info format for compatibility
                 remesh_info = {
                     'has_remesh': True,
                     'remesh_events': events,
@@ -4294,7 +4154,7 @@ def main(overwrite_existing: bool = False,
         try:
             # Use the detected breathing cycle start time, or fallback to auto-detection
             if start_time is not None:
-                display_timestep = int(start_time)
+                display_timestep = round(start_time)
                 print(f"   Using timestep: {display_timestep}ms (start of breathing cycle)")
             else:
                 visualization_timestep, display_timestep = auto_detect_visualization_timestep(subject_name, flow_profile_path)
@@ -4309,12 +4169,8 @@ def main(overwrite_existing: bool = False,
         except Exception as e:
             print(f"❌ Failed to create interactive HTML: {e}")
 
-        # Create template tracking locations JSON (with remesh info if applicable) - LEGACY
-        print(f"\n📋 Creating template tracking locations file (legacy format)...")
-        template_file = create_template_tracking_locations(subject_name, results_dir, remesh_info)
-
-        # Create split JSON files (new portable format)
-        print(f"\n📋 Creating split JSON files for portable workflow...")
+        # Create JSON config files for Phase 2
+        print(f"\n📋 Creating JSON config files...")
         try:
             from utils.file_processing import create_metadata_json, create_picked_points_template
 
@@ -4337,8 +4193,8 @@ def main(overwrite_existing: bool = False,
             )
 
         except Exception as e:
-            print(f"⚠️  Failed to create split JSON files: {e}")
-            print(f"   Legacy tracking_locations.json will be used instead")
+            print(f"❌ Failed to create JSON config files: {e}")
+            raise
 
         print(f"\n" + "="*60)
         print("✅ PATCH SELECTION MODE COMPLETE")
@@ -4348,7 +4204,6 @@ def main(overwrite_existing: bool = False,
         print(f"   📦 {subject_name}_cfd_data_light.h5     (Light HDF5 - single timestep, portable)")
         print(f"   📄 {subject_name}_metadata.json         (System metadata - do not edit)")
         print(f"   📄 {subject_name}_picked_points.json    (Point picker template - EDIT THIS)")
-        print(f"   📄 {subject_name}_tracking_locations.json (Legacy format - backward compatible)")
 
         print(f"\n🖥️  For LOCAL point picking (recommended for large datasets):")
         print(f"1. Copy these files to your local machine:")
@@ -4413,6 +4268,16 @@ def main(overwrite_existing: bool = False,
         from data_processing.trajectory import get_remesh_metadata
         remesh_metadata = get_remesh_metadata(hdf5_file_path)
 
+        # If HDF5 says has_remesh but no events, load from metadata.json
+        if remesh_metadata.get('has_remesh') and not remesh_metadata.get('remesh_events'):
+            metadata_path = results_dir / f"{subject_name}_metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path) as f:
+                    metadata_json = json.load(f)
+                if 'remesh_info' in metadata_json and metadata_json['remesh_info'].get('remesh_events'):
+                    remesh_metadata = metadata_json['remesh_info']
+                    print(f"📊 Loaded remesh metadata from metadata.json (fallback)")
+
         # Handle remesh: either from HDF5 metadata or from command line flags
         should_process_remesh = remesh_metadata.get('has_remesh', False) or has_remesh
         remesh_events_from_hdf5 = remesh_metadata.get('remesh_events', [])
@@ -4421,24 +4286,46 @@ def main(overwrite_existing: bool = False,
             print(f"\n🔄 Remesh handling enabled")
             from utils.file_processing import update_tracking_locations_for_remesh, update_tracking_locations_for_multiple_remesh
 
-            # Find xyz_tables directory
-            # Priority: xyz_path > patched > default > raw_dir
-            xyz_dirs = [
-                Path(xyz_path) if xyz_path else None,
-                Path(f'{subject_name}_xyz_tables_with_patches'),
-                Path(f'{subject_name}_xyz_tables'),
-                Path(raw_dir) if raw_dir else None
-            ]
-            xyz_dirs = [d for d in xyz_dirs if d and d.exists()]
-            xyz_tables_dir = xyz_dirs[0] if xyz_dirs else None
-
-            if not xyz_tables_dir:
-                print(f"❌ No xyz_tables directory found for remesh processing")
-                return
-
-            # Load current tracking config (supports both new split JSON and legacy format)
+            # Load current tracking config first to check if mappings already exist
             tracking_config = load_and_merge_configs(subject_name=subject_name, results_dir=results_dir)
 
+            # Check if post_remesh_list already exists for all locations
+            locations = tracking_config.get('locations', [])
+            has_existing_mappings = all(
+                loc.get('post_remesh_list') and len(loc['post_remesh_list']) > 0
+                for loc in locations
+            ) if locations else False
+
+            # Check if tracking locations are still placeholders (coordinates [0,0,0])
+            all_placeholder = all(
+                loc.get('coordinates', [0, 0, 0]) == [0, 0, 0] or loc.get('coordinates', [0.0, 0.0, 0.0]) == [0.0, 0.0, 0.0]
+                for loc in locations
+            ) if locations else True
+
+            if has_existing_mappings:
+                print(f"   ✅ Post-remesh mappings already exist - skipping remesh calculation")
+            elif all_placeholder:
+                print(f"   ⚠️  Tracking locations are placeholders - skipping remesh calculation")
+                print(f"   💡 Update tracking_locations.json with real coordinates, then re-run")
+            else:
+                # Find xyz_tables directory - only needed if we need to compute new mappings
+                # Priority: xyz_path > patched > default > raw_dir
+                xyz_dirs = [
+                    Path(xyz_path) if xyz_path else None,
+                    Path(f'{subject_name}_xyz_tables_with_patches'),
+                    Path(f'{subject_name}_xyz_tables'),
+                    Path(raw_dir) if raw_dir else None
+                ]
+                xyz_dirs = [d for d in xyz_dirs if d and d.exists()]
+                xyz_tables_dir = xyz_dirs[0] if xyz_dirs else None
+
+                if not xyz_tables_dir:
+                    print(f"   ⚠️  No xyz_tables directory found for remesh coordinate mapping")
+                    print(f"   💡 Continuing without remesh mapping - some post-remesh data may be unavailable")
+                    should_process_remesh = False  # Skip further remesh processing
+
+        # Only process remesh if we have xyz_tables_dir and need to compute mappings
+        if should_process_remesh and not has_existing_mappings and not all_placeholder:
             # Check if we have multiple remesh events
             if len(remesh_events_from_hdf5) > 1:
                 # Multiple remesh events - use new multi-remesh function
@@ -4457,14 +4344,18 @@ def main(overwrite_existing: bool = False,
                         tracking_config, remesh_events_from_hdf5, xyz_tables_dir
                     )
 
-                    # Save updated config (legacy format for backward compatibility)
+                    # Save updated locations to picked_points.json
                     results_dir = Path(f'{subject_name}_results')
-                    updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
-                    with open(updated_json_path, 'w') as f:
-                        json.dump(updated_config, f, indent=2)
-                    print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+                    picked_points_path = results_dir / f"{subject_name}_picked_points.json"
+                    if picked_points_path.exists():
+                        with open(picked_points_path, 'r') as f:
+                            picked_points_data = json.load(f)
+                        picked_points_data['locations'] = updated_config.get('locations', [])
+                        with open(picked_points_path, 'w') as f:
+                            json.dump(picked_points_data, f, indent=2)
+                        print(f"✅ Updated picked_points.json with post-remesh mappings")
 
-                    # Also save post_remesh_mappings to metadata.json (new format)
+                    # Also save post_remesh_mappings to metadata.json
                     remesh_mappings = []
                     for loc in updated_config.get('locations', []):
                         if loc.get('post_remesh_list'):
@@ -4541,14 +4432,18 @@ def main(overwrite_existing: bool = False,
                         tracking_config, before_path, after_path
                     )
 
-                    # Save updated config (legacy format for backward compatibility)
+                    # Save updated locations to picked_points.json
                     results_dir = Path(f'{subject_name}_results')
-                    updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
-                    with open(updated_json_path, 'w') as f:
-                        json.dump(updated_config, f, indent=2)
-                    print(f"✅ Updated tracking locations saved to: {updated_json_path}")
+                    picked_points_path = results_dir / f"{subject_name}_picked_points.json"
+                    if picked_points_path.exists():
+                        with open(picked_points_path, 'r') as f:
+                            picked_points_data = json.load(f)
+                        picked_points_data['locations'] = updated_config.get('locations', [])
+                        with open(picked_points_path, 'w') as f:
+                            json.dump(picked_points_data, f, indent=2)
+                        print(f"✅ Updated picked_points.json with post-remesh mappings")
 
-                    # Also save post_remesh_mappings to metadata.json (new format)
+                    # Also save post_remesh_mappings to metadata.json
                     remesh_mappings = []
                     for loc in updated_config.get('locations', []):
                         post_remesh = loc.get('post_remesh') or (loc.get('post_remesh_list', [None])[0] if loc.get('post_remesh_list') else None)
@@ -4563,6 +4458,39 @@ def main(overwrite_existing: bool = False,
                         save_post_remesh_mappings(subject_name, remesh_mappings, results_dir)
         else:
             print(f"   No remesh detected - using consistent patch/face indices")
+
+        # Generate remesh comparison visualization if remesh was processed
+        if should_process_remesh and locations:
+            try:
+                from visualization.surface_plots import visualize_remesh_comparison
+
+                # Get remesh events from metadata or HDF5
+                remesh_events = remesh_metadata.get('remesh_events', [])
+                if not remesh_events and remesh_metadata.get('has_remesh'):
+                    # Single remesh event from legacy format
+                    remesh_events = [{
+                        'timestep_boundary': remesh_metadata.get('remesh_timestep_ms', 0)
+                    }]
+
+                interactive_dir = results_dir / 'interactive'
+                interactive_dir.mkdir(parents=True, exist_ok=True)
+
+                for i, event in enumerate(remesh_events):
+                    before_ms = event.get('timestep_boundary', 0) - 1
+                    after_ms = event.get('timestep_boundary', 0)
+
+                    if before_ms > 0 and after_ms > 0:
+                        visualize_remesh_comparison(
+                            hdf5_path=hdf5_file_path,
+                            before_timestep_ms=before_ms,
+                            after_timestep_ms=after_ms,
+                            tracking_locations=locations,
+                            subject_name=subject_name,
+                            output_dir=interactive_dir,
+                            remesh_event_num=i + 1
+                        )
+            except Exception as e:
+                print(f"⚠️  Could not generate remesh comparison visualization: {e}")
 
         # Force processing to continue with plotting
         overwrite_existing = False  # Don't reprocess, just use existing HDF5
@@ -4589,14 +4517,14 @@ def main(overwrite_existing: bool = False,
             print(f"❌ Failed to create tracking locations file for {subject_name}")
     
     # Verify required files exist using smart resolution
-    validation_results = validate_subject_files(subject_name)
-    
-    if not all(validation_results.values()):
-        missing = [k for k, v in validation_results.items() if not v]
-        print(f"❌ Missing required files for subject {subject_name}: {missing}")
-        raise FileNotFoundError(f"Missing required files for subject {subject_name}")
-    
-    print(f"✅ All required files found for {subject_name}")
+    # For plotting mode, skip validation - HDF5 checked earlier, picked_points checked when loading config
+    if not plotting_mode:
+        validation_results = validate_subject_files(subject_name)
+        if not all(validation_results.values()):
+            missing = [k for k, v in validation_results.items() if not v]
+            print(f"❌ Missing required files for subject {subject_name}: {missing}")
+            raise FileNotFoundError(f"Missing required files for subject {subject_name}")
+        print(f"✅ All required files found for {subject_name}")
     
     # Note: Flow profile smoothing is now done in-memory during analysis
     print(f"\n✅ Flow profile smoothing will be applied in-memory during analysis")
@@ -4622,8 +4550,13 @@ def main(overwrite_existing: bool = False,
     print(f"  - Interactive files: {interactive_dir}")
     
     # Check if we need to process the data
-    tracking_config = load_tracking_locations(subject_name=subject_name)
-    tracking_locations = tracking_config['locations']  # Extract just the locations for compatibility
+    # Use new format: picked_points.json + metadata.json (not legacy tracking_locations.json)
+    tracking_config = load_and_merge_configs(subject_name=subject_name, results_dir=results_dir)
+    if tracking_config.get('source') == 'none':
+        print(f"❌ No picked_points.json found in {results_dir}")
+        print(f"   Run --point-picker to select anatomical landmarks first")
+        return
+    tracking_locations = tracking_config['locations']
     all_files_exist = True
 
     # PHASE 2 PLOTTING: Always regenerate tracking CSVs to include patch analysis
@@ -4854,23 +4787,35 @@ def main(overwrite_existing: bool = False,
         # Get remesh metadata for split-chunk tracking
         from data_processing.trajectory import get_remesh_metadata
         remesh_metadata = get_remesh_metadata(hdf5_file_path) if Path(hdf5_file_path).exists() else {'has_remesh': False, 'remesh_events': []}
+
+        # If HDF5 says has_remesh but no events, load from metadata.json
+        if remesh_metadata.get('has_remesh') and not remesh_metadata.get('remesh_events'):
+            if metadata_json and 'remesh_info' in metadata_json and metadata_json['remesh_info'].get('remesh_events'):
+                remesh_metadata = metadata_json['remesh_info']
+
         has_remesh = remesh_metadata.get('has_remesh', False)
         remesh_events = remesh_metadata.get('remesh_events', [])
         remesh_timestep_ms = remesh_metadata.get('remesh_timestep_ms', None)  # Backward compat
 
         if has_remesh and remesh_events:
             print(f"\n🔄 Remesh detected: {len(remesh_events)} event(s)")
+            # Helper to get timestep (metadata.json uses 'timestep_boundary', HDF5 uses 'timestep_ms')
+            def get_ts(evt):
+                return evt.get('timestep_ms') or evt.get('timestep_boundary', 0)
             for i, event in enumerate(remesh_events, 1):
-                print(f"   #{i}: boundary at {event['timestep_ms']:.1f}ms")
+                print(f"   #{i}: boundary at {get_ts(event):.1f}ms")
             if len(remesh_events) == 1:
-                print(f"   Chunk 0: t < {remesh_events[0]['timestep_ms']:.1f}ms (original mesh)")
-                print(f"   Chunk 1: t >= {remesh_events[0]['timestep_ms']:.1f}ms (remeshed)")
+                print(f"   Chunk 0: t < {get_ts(remesh_events[0]):.1f}ms (original mesh)")
+                print(f"   Chunk 1: t >= {get_ts(remesh_events[0]):.1f}ms (remeshed)")
             else:
-                print(f"   Chunk 0: t < {remesh_events[0]['timestep_ms']:.1f}ms (original mesh)")
+                print(f"   Chunk 0: t < {get_ts(remesh_events[0]):.1f}ms (original mesh)")
                 for i, event in enumerate(remesh_events[:-1]):
                     next_event = remesh_events[i+1]
-                    print(f"   Chunk {i+1}: {event['timestep_ms']:.1f}ms <= t < {next_event['timestep_ms']:.1f}ms")
-                print(f"   Chunk {len(remesh_events)}: t >= {remesh_events[-1]['timestep_ms']:.1f}ms")
+                    print(f"   Chunk {i+1}: {get_ts(event):.1f}ms <= t < {get_ts(next_event):.1f}ms")
+                print(f"   Chunk {len(remesh_events)}: t >= {get_ts(remesh_events[-1]):.1f}ms")
+
+            # NOTE: Remesh boundary visualizations will be generated AFTER coordinate matching
+            # so we can show the correct post-remesh mapped tracking points
 
         # Track which locations were updated (for coordinate auto-update)
         locations_updated = False
@@ -4917,6 +4862,10 @@ def main(overwrite_existing: bool = False,
 
                 all_chunk_data = []
 
+                # Helper to get timestep from remesh event (handles both formats)
+                def get_event_timestep(evt):
+                    return evt.get('timestep_ms') or evt.get('timestep_boundary', 0)
+
                 # Track each chunk with appropriate patch/face
                 for chunk_idx in range(n_chunks):
                     if chunk_idx == 0:
@@ -4924,7 +4873,7 @@ def main(overwrite_existing: bool = False,
                         chunk_patch = patch_number
                         chunk_face = face_index
                         t_start = 0
-                        t_end = remesh_events[0]['timestep_ms']
+                        t_end = get_event_timestep(remesh_events[0])
                         chunk_label = f"Chunk 0 (original)"
                     else:
                         # Subsequent chunks: use post_remesh mapping
@@ -4938,9 +4887,9 @@ def main(overwrite_existing: bool = False,
                             chunk_patch = chunk_patch  # Keep previous
                             chunk_face = chunk_face
 
-                        t_start = remesh_events[chunk_idx - 1]['timestep_ms']
+                        t_start = get_event_timestep(remesh_events[chunk_idx - 1])
                         if chunk_idx < n_events:
-                            t_end = remesh_events[chunk_idx]['timestep_ms']
+                            t_end = get_event_timestep(remesh_events[chunk_idx])
                         else:
                             t_end = float('inf')
                         chunk_label = f"Chunk {chunk_idx} (after remesh #{chunk_idx})"
@@ -5054,11 +5003,110 @@ def main(overwrite_existing: bool = False,
         
         # Save updated tracking config if coordinates were updated
         if locations_updated:
-            # Save to results folder (json already imported at top of file)
-            updated_json_path = results_dir / f"{subject_name}_tracking_locations.json"
+            # Save to results folder using new format (picked_points.json)
+            updated_json_path = results_dir / f"{subject_name}_picked_points.json"
             with open(updated_json_path, 'w') as f:
                 json.dump(tracking_config, f, indent=2)
-            print(f"\n📋 Updated tracking locations saved with coordinates: {updated_json_path}")
+            print(f"\n📋 Updated picked points saved with coordinates: {updated_json_path}")
+
+        # Regenerate remesh visualizations NOW that tracking_locations have post_remesh_list populated
+        if has_remesh and remesh_events and tracking_locations:
+            print(f"\n📊 Generating remesh boundary visualizations with mapped points...")
+            from data_processing.trajectory import extract_single_timestep_to_hdf5
+
+            # Helper to get timestep from remesh event
+            def get_remesh_ts(evt):
+                return evt.get('timestep_ms') or evt.get('timestep_boundary', 0)
+
+            # Helper to build tracking_locations for a specific chunk
+            def get_locations_for_chunk(chunk_idx, locations):
+                """Return tracking locations appropriate for the given mesh chunk."""
+                if chunk_idx == 0:
+                    # Original mesh - use original locations
+                    return locations
+                else:
+                    # Post-remesh chunk - use post_remesh_list[chunk_idx - 1]
+                    chunk_locations = []
+                    for loc in locations:
+                        post_list = loc.get('post_remesh_list', [])
+                        if chunk_idx - 1 < len(post_list):
+                            mapping = post_list[chunk_idx - 1]
+                            chunk_locations.append({
+                                'description': loc['description'],
+                                'patch_number': mapping.get('patch_number', 0),
+                                'face_indices': [mapping.get('face_index', 0)],
+                                'coordinates': mapping.get('coordinates', loc.get('coordinates', [0, 0, 0]))
+                            })
+                        else:
+                            # No mapping for this chunk - skip or use original
+                            chunk_locations.append(loc)
+                    return chunk_locations
+
+            # Determine chunk boundaries
+            chunk_boundaries = [get_remesh_ts(evt) for evt in remesh_events]
+
+            # Generate HTML for each remesh boundary (before and after)
+            for event_idx, event in enumerate(remesh_events):
+                boundary_ts = int(get_remesh_ts(event))
+                before_ts = boundary_ts - 1
+
+                # Before remesh: chunk = event_idx (0 for first remesh)
+                # After remesh: chunk = event_idx + 1
+                before_chunk = event_idx
+                after_chunk = event_idx + 1
+
+                before_locations = get_locations_for_chunk(before_chunk, tracking_locations)
+                after_locations = get_locations_for_chunk(after_chunk, tracking_locations)
+
+                # Generate BEFORE visualization
+                try:
+                    temp_h5_before = f"{subject_name}_results/{subject_name}_temp_t{before_ts}ms.h5"
+                    if Path(hdf5_file_path).exists():
+                        extract_single_timestep_to_hdf5(hdf5_file_path, temp_h5_before, timestep_ms=before_ts)
+                        if Path(temp_h5_before).exists():
+                            plot_3d_interactive_all_patches(
+                                temp_h5_before, before_locations, subject_name,
+                                interactive_dir, time_point=before_ts
+                            )
+                            Path(temp_h5_before).unlink()
+                            print(f"   ✅ t={before_ts}ms (before remesh {event_idx+1}, chunk {before_chunk})")
+                except Exception as e:
+                    print(f"   ⚠️  Error for t={before_ts}ms: {e}")
+
+                # Generate AFTER visualization
+                try:
+                    temp_h5_after = f"{subject_name}_results/{subject_name}_temp_t{boundary_ts}ms.h5"
+                    if Path(hdf5_file_path).exists():
+                        extract_single_timestep_to_hdf5(hdf5_file_path, temp_h5_after, timestep_ms=boundary_ts)
+                        if Path(temp_h5_after).exists():
+                            plot_3d_interactive_all_patches(
+                                temp_h5_after, after_locations, subject_name,
+                                interactive_dir, time_point=boundary_ts
+                            )
+                            Path(temp_h5_after).unlink()
+                            print(f"   ✅ t={boundary_ts}ms (after remesh {event_idx+1}, chunk {after_chunk})")
+                except Exception as e:
+                    print(f"   ⚠️  Error for t={boundary_ts}ms: {e}")
+
+            # Regenerate remesh comparison HTMLs with updated locations
+            try:
+                from visualization.surface_plots import visualize_remesh_comparison
+                for i, event in enumerate(remesh_events):
+                    before_ms = int(get_remesh_ts(event)) - 1
+                    after_ms = int(get_remesh_ts(event))
+                    if before_ms > 0 and after_ms > 0:
+                        visualize_remesh_comparison(
+                            hdf5_path=hdf5_file_path,
+                            before_timestep_ms=before_ms,
+                            after_timestep_ms=after_ms,
+                            tracking_locations=tracking_locations,  # Now has post_remesh_list populated
+                            subject_name=subject_name,
+                            output_dir=interactive_dir,
+                            remesh_event_num=i + 1
+                        )
+                print(f"   ✅ Remesh comparison HTMLs regenerated with mapped points")
+            except Exception as e:
+                print(f"   ⚠️  Error regenerating comparison HTMLs: {e}")
 
         # Process combinations after individual points are done
         print("\nProcessing combinations...")
@@ -5494,13 +5542,17 @@ def main(overwrite_existing: bool = False,
                 
                 # Create CFD analysis panels if we have data
                 if single_point_dfs or patch_dfs:
-                    # Create CFD analysis 3x3 panel (smoothed, no markers)
+                    # Create CFD analysis 3x3 panel (smoothed, no markers) - shared scale
                     create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
-                    
-                    # Create CFD analysis 3x3 panel with markers (smoothed, with markers)
+
+                    # Create CFD analysis 3x3 panel with markers (smoothed, with markers) - shared scale
                     create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
-                    
-                    print(f"CFD Analysis 3x3 panels completed.")
+
+                    # Create CFD analysis 3x3 panels with original data scale (each subplot auto-scaled)
+                    create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
+                    create_cfd_analysis_3x3_panel_with_markers_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
+
+                    print(f"CFD Analysis 3x3 panels completed (shared scale + original data scale).")
                 else:
                     print(f"Warning: No CFD data found for analysis")
             else:

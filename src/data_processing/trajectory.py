@@ -886,13 +886,16 @@ def store_remesh_metadata(hdf5_file_path: str,
                     first_event = remesh_events[0]
                     f.attrs['remesh_before_file'] = first_event['before_file'].encode('utf-8')
                     f.attrs['remesh_after_file'] = first_event['after_file'].encode('utf-8')
-                    f.attrs['remesh_timestep_ms'] = first_event['timestep_ms']
+                    # Handle both timestep_ms and timestep_boundary
+                    first_ts = first_event.get('timestep_ms') or first_event.get('timestep_boundary', 0)
+                    f.attrs['remesh_timestep_ms'] = first_ts
 
                     print(f"📊 Stored remesh metadata in HDF5:")
                     print(f"   Has remesh: {has_remesh}")
                     print(f"   Total remesh events: {len(remesh_events)}")
                     for i, event in enumerate(remesh_events, 1):
-                        print(f"   #{i}: {event['before_file']} → {event['after_file']} @ {event['timestep_ms']:.1f}ms")
+                        ts = event.get('timestep_ms') or event.get('timestep_boundary', 0)
+                        print(f"   #{i}: {event['before_file']} → {event['after_file']} @ {ts:.1f}ms")
 
                 elif remesh_before_file and remesh_after_file:
                     # Single event (backward compatibility)
@@ -977,7 +980,9 @@ def get_remesh_metadata(hdf5_file_path: str) -> dict:
                 print(f"   Has remesh: {metadata['has_remesh']}")
                 print(f"   Total remesh events: {metadata['remesh_event_count']}")
                 for i, event in enumerate(metadata['remesh_events'], 1):
-                    print(f"   #{i}: {event['before_file']} → {event['after_file']} @ {event['timestep_ms']:.1f}ms")
+                    # Handle both timestep_ms (HDF5 native) and timestep_boundary (from metadata.json)
+                    ts = event.get('timestep_ms') or event.get('timestep_boundary', 0)
+                    print(f"   #{i}: {event['before_file']} → {event['after_file']} @ {ts:.1f}ms")
 
             return metadata
     except Exception as e:

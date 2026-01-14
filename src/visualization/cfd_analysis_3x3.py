@@ -21,177 +21,33 @@ from typing import Dict, List, Optional
 import json
 import matplotlib.colors as mcolors
 
-
-def smart_label_position(ax, target_xy, text, existing_labels, data_points=None, 
-                        margin_factor=0.08, min_distance=0.15):
-    """
-    Zone-based label positioning that guarantees no overlaps by using the entire plot area.
-    
-    Args:
-        ax: matplotlib axis object
-        target_xy: (x, y) tuple of the target point to annotate
-        text: the text to display
-        existing_labels: list of existing label positions [(x, y), ...]
-        data_points: optional array of data points to avoid (less important now)
-        margin_factor: fraction of plot range to use as margin from edges
-        min_distance: minimum distance between labels (fraction of plot range)
-    
-    Returns:
-        (xytext, ha, va): position and alignment for the label
-    """
-    x_target, y_target = target_xy
-    
-    # Get plot boundaries
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    x_range = xlim[1] - xlim[0]
-    y_range = ylim[1] - ylim[0]
-    
-    # Calculate margins and minimum distance
-    x_margin = margin_factor * x_range
-    y_margin = margin_factor * y_range
-    min_dist = min_distance * min(x_range, y_range)
-    
-    # Estimate text bounding box for the larger font size
-    font_size = 11  # Increased by 20% from 9 to ~11
-    char_width = font_size * 0.6
-    char_height = font_size * 1.2
-    text_width = len(text) * char_width
-    text_height = char_height
-    
-    # Convert text dimensions to data coordinates
-    text_width_data = text_width * x_range / 800
-    text_height_data = text_height * y_range / 600
-    
-    # Define strategic zones across the entire plot area
-    # Use 6x4 grid of zones to distribute labels evenly
-    zones = []
-    n_cols = 6
-    n_rows = 4
-    
-    for row in range(n_rows):
-        for col in range(n_cols):
-            # Calculate zone center
-            zone_x = xlim[0] + x_margin + (col + 0.5) * (x_range - 2*x_margin) / n_cols
-            zone_y = ylim[0] + y_margin + (row + 0.5) * (y_range - 2*y_margin) / n_rows
-            
-            # Determine alignment based on zone position
-            if col < n_cols // 3:
-                ha = 'left'
-            elif col >= 2 * n_cols // 3:
-                ha = 'right'
-            else:
-                ha = 'center'
-                
-            if row < n_rows // 2:
-                va = 'bottom'
-            else:
-                va = 'top'
-            
-            # Calculate priority based on distance to target (closer zones preferred)
-            distance_to_target = np.sqrt((zone_x - x_target)**2 + (zone_y - y_target)**2)
-            
-            zones.append({
-                'x': zone_x,
-                'y': zone_y,
-                'ha': ha,
-                'va': va,
-                'priority': distance_to_target
-            })
-    
-    # Sort zones by priority (closer to target first, but we'll use any available zone)
-    zones.sort(key=lambda z: z['priority'])
-    
-    def is_zone_available(zone):
-        x, y, ha, va = zone['x'], zone['y'], zone['ha'], zone['va']
-        
-        # Calculate actual text bounds
-        if ha == 'left':
-            text_x_min, text_x_max = x, x + text_width_data
-        elif ha == 'right':
-            text_x_min, text_x_max = x - text_width_data, x
-        else:  # center
-            text_x_min, text_x_max = x - text_width_data/2, x + text_width_data/2
-            
-        if va == 'bottom':
-            text_y_min, text_y_max = y, y + text_height_data
-        elif va == 'top':
-            text_y_min, text_y_max = y - text_height_data, y
-        else:  # center
-            text_y_min, text_y_max = y - text_height_data/2, y + text_height_data/2
-        
-        # Check boundaries
-        if (text_x_min < xlim[0] + x_margin or text_x_max > xlim[1] - x_margin or 
-            text_y_min < ylim[0] + y_margin or text_y_max > ylim[1] - y_margin):
-            return False
-        
-        # Check distance from existing labels - this is the critical part for no overlaps
-        for existing_x, existing_y in existing_labels:
-            distance = np.sqrt((x - existing_x)**2 + (y - existing_y)**2)
-            if distance < min_dist:
-                return False
-        
-        return True
-    
-    # Try zones in order until we find an available one
-    for zone in zones:
-        if is_zone_available(zone):
-            return (zone['x'], zone['y']), zone['ha'], zone['va']
-    
-    # If all zones are somehow occupied (very unlikely with 24 zones), 
-    # use a fallback position at the edge
-    fallback_x = xlim[1] - x_margin - text_width_data/2
-    fallback_y = ylim[1] - y_margin - text_height_data/2
-    return (fallback_x, fallback_y), 'right', 'top'
+# Import shared utilities
+from utils.signal_processing import find_zero_crossings, smart_label_position, format_time_label
 
 
-def format_time_label(time_value):
-    """Format time values to remove unnecessary decimal places."""
-    if time_value == int(time_value):
-        return f"{int(time_value)}s"
-    else:
-        # Remove trailing zeros and unnecessary decimal places
-        return f"{time_value:.2f}s".rstrip('0').rstrip('.')
-
-def find_zero_crossings(times, values):
-    """Find the times when values cross zero."""
-    zero_crossings = np.where(np.diff(np.signbit(values)))[0]
-    crossing_times = []
-    
-    for idx in zero_crossings:
-        if idx + 1 < len(times) and idx >= 0:
-            t0, t1 = times[idx], times[idx + 1]
-            v0, v1 = values[idx], values[idx + 1]
-            
-            if v1 != v0:
-                t_cross = t0 - v0 * (t1 - t0) / (v1 - v0)
-                crossing_times.append(t_cross)
-    
-    return crossing_times
-
-
-def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_markers=False):
+def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_markers=False, original_data_scale=False):
     """
     Create a single 3x3 page for CFD analysis.
-    
+
     Args:
         data_dict: Dictionary with processed data for each location
         subject_name: Subject name
         page_title: Title for this page
         pdf: PDF object to save to
         with_markers: Whether to include zero-crossing markers
+        original_data_scale: If True, each subplot uses its own data range instead of shared range
     """
     # Create figure with 3x3 layout
     fig = plt.figure(figsize=(20, 20))
     gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-    
-    # Define the locations
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
-    
+
+    # Dynamically build locations from whatever keys are in the data
+    locations = []
+    for key in data_dict.keys():
+        # Convert key to display name (capitalize, replace underscores with spaces)
+        description = key.replace('_', ' ').title()
+        locations.append({'key': key, 'description': description})
+
     # Find mutual ranges across all locations
     v_max = max([data['v_max'] for data in data_dict.values()])
     a_max = max([data['a_max'] for data in data_dict.values()])
@@ -235,12 +91,22 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
             continue
             
         data = data_dict[loc['key']]
-        
+
         # Get the smoothed data
         normalized_times = data['normalized_times']
         vdotn_smooth_mm = data['vdotn_smooth'] * 1000  # Convert to mm/s
         pressure_smooth = data['pressure_smooth']
         adotn_smooth_mm = data['adotn_smooth'] * 1000  # Convert to mm/s²
+
+        # Determine axis limits: use per-location limits if original_data_scale=True
+        if original_data_scale:
+            v_max_use = np.max(np.abs(vdotn_smooth_mm)) * 1.05
+            a_max_use = np.max(np.abs(adotn_smooth_mm)) * 1.05
+            p_max_use = np.max(np.abs(pressure_smooth)) * 1.05
+        else:
+            v_max_use = v_max
+            a_max_use = a_max
+            p_max_use = p_max
         
         # Initialize label tracking for this subplot
         ax1_labels = []
@@ -293,8 +159,8 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
                            color='black', fontsize=11, fontweight='bold',
                            ha=ha, va=va)
         
-        ax1.set_xlim(-v_max, v_max)
-        ax1.set_ylim(-p_max, p_max)
+        ax1.set_xlim(-v_max_use, v_max_use)
+        ax1.set_ylim(-p_max_use, p_max_use)
         ax1.set_xlabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
@@ -303,7 +169,7 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
         for label in ax1.get_xticklabels() + ax1.get_yticklabels():
             label.set_fontweight('bold')
-        
+
         # 2. Plot p vs a (smoothed)
         ax2 = fig.add_subplot(gs[i, 1])
         scatter2 = ax2.scatter(adotn_smooth_mm, pressure_smooth, c=normalized_times, cmap=custom_cmap, norm=norm, s=20, alpha=0.8)
@@ -350,8 +216,8 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
                            color='black', fontsize=11, fontweight='bold',
                            ha=ha, va=va)
         
-        ax2.set_xlim(-a_max, a_max)
-        ax2.set_ylim(-p_max, p_max)
+        ax2.set_xlim(-a_max_use, a_max_use)
+        ax2.set_ylim(-p_max_use, p_max_use)
         ax2.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
         ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
@@ -407,8 +273,8 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
                            color='black', fontsize=11, fontweight='bold',
                            ha=ha, va=va)
         
-        ax3.set_xlim(-a_max, a_max)
-        ax3.set_ylim(-v_max, v_max)
+        ax3.set_xlim(-a_max_use, a_max_use)
+        ax3.set_ylim(-v_max_use, v_max_use)
         ax3.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
         ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
@@ -425,7 +291,8 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     
     # Add overall title
     marker_text = " with Zero-Crossing Markers" if with_markers else ""
-    fig.suptitle(f'CFD Analysis: {page_title}\nSmoothed, Symmetric Plots{marker_text}', 
+    scale_text = " (Original Data Scale)" if original_data_scale else ""
+    fig.suptitle(f'CFD Analysis: {page_title}\nSmoothed, Symmetric Plots{marker_text}{scale_text}', 
                  fontsize=16, fontweight='bold', y=0.98)
     
     # Add note
@@ -442,15 +309,16 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
 def process_data_for_page(dfs_dict, is_patch=False, radius_key=None):
     """
     Process data for a single page (either single points or patch data).
-    
+
     Returns:
         Dictionary with processed data for each location
     """
-    locations = [
-        {'key': 'posterior_border_of_soft_palate', 'description': 'Posterior Border of Soft Palate'},
-        {'key': 'back_of_tongue', 'description': 'Back of Tongue'},
-        {'key': 'superior_border_of_epiglottis', 'description': 'Superior Border of Epiglottis'}
-    ]
+    # Dynamically build locations from whatever keys are in the data
+    locations = []
+    for key in dfs_dict.keys():
+        # Convert key to display name (capitalize, replace underscores with spaces)
+        description = key.replace('_', ' ').title()
+        locations.append({'key': key, 'description': description})
     
     # Find global time minimum
     global_time_min = float('inf')
@@ -665,6 +533,86 @@ def create_cfd_analysis_3x3_panel_with_markers(dfs, patch_dfs, subject_name, pdf
         print(f"Saved to: {subject_name}_cfd_analysis_3x3_with_markers.pdf")
 
 
+def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None):
+    """
+    Create multi-page CFD analysis 3x3 panels with original data scale (each subplot uses its own range).
+    Creates a SEPARATE PDF file for original data scale.
+
+    Page 1: Single point data
+    Page 2+: Patch mean data for each radius
+    """
+    print(f"\nGenerating CFD Analysis 3x3 Panel (Original Data Scale)...")
+
+    # Create separate PDF file for original data scale
+    if pdfs_dir:
+        pdf_path = pdfs_dir / f'{subject_name}_3x3_panel_original_data_scale.pdf'
+        with PdfPages(pdf_path) as orig_pdf:
+            # Page 1: Single point data
+            if dfs:
+                print("Creating Page 1: Single Point Data (original scale)")
+                single_point_data = process_data_for_page(dfs, is_patch=False)
+                if single_point_data:
+                    create_single_3x3_page(single_point_data, subject_name, "Single Point Data", orig_pdf,
+                                           with_markers=False, original_data_scale=True)
+
+            # Page 2+: Patch data for each radius
+            if patch_dfs:
+                all_radii = set()
+                for location_data in patch_dfs.values():
+                    all_radii.update(location_data.keys())
+                sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
+
+                for radius_key in sorted_radii:
+                    print(f"Creating Page: Patch Mean Data ({radius_key}) original scale")
+                    patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key)
+                    if patch_data:
+                        page_title = f"Patch Mean Data ({radius_key})"
+                        create_single_3x3_page(patch_data, subject_name, page_title, orig_pdf,
+                                               with_markers=False, original_data_scale=True)
+
+        print(f"Saved to: {pdf_path}")
+
+
+def create_cfd_analysis_3x3_panel_with_markers_original_scale(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None):
+    """
+    Create multi-page CFD analysis 3x3 panels with markers and original data scale.
+    Creates a SEPARATE PDF file for original data scale with markers.
+
+    Page 1: Single point data
+    Page 2+: Patch mean data for each radius
+    """
+    print(f"\nGenerating CFD Analysis 3x3 Panel with Markers (Original Data Scale)...")
+
+    # Create separate PDF file for original data scale with markers
+    if pdfs_dir:
+        pdf_path = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_original_data_scale.pdf'
+        with PdfPages(pdf_path) as orig_pdf:
+            # Page 1: Single point data
+            if dfs:
+                print("Creating Page 1: Single Point Data (with markers, original scale)")
+                single_point_data = process_data_for_page(dfs, is_patch=False)
+                if single_point_data:
+                    create_single_3x3_page(single_point_data, subject_name, "Single Point Data", orig_pdf,
+                                           with_markers=True, original_data_scale=True)
+
+            # Page 2+: Patch data for each radius
+            if patch_dfs:
+                all_radii = set()
+                for location_data in patch_dfs.values():
+                    all_radii.update(location_data.keys())
+                sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
+
+                for radius_key in sorted_radii:
+                    print(f"Creating Page: Patch Mean Data ({radius_key}) with markers, original scale")
+                    patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key)
+                    if patch_data:
+                        page_title = f"Patch Mean Data ({radius_key})"
+                        create_single_3x3_page(patch_data, subject_name, page_title, orig_pdf,
+                                               with_markers=True, original_data_scale=True)
+
+        print(f"Saved to: {pdf_path}")
+
+
 def create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir=None, default_radius="2.0mm"):
     """
     Create a dedicated 3x3 comparison page showing single point data vs patch data overlays.
@@ -849,13 +797,15 @@ def load_cfd_data_for_analysis(subject_name: str, output_dir: Path, enable_patch
         tuple: (single_point_dfs, patch_dfs) dictionaries
     """
     print(f"Loading CFD data for analysis...")
-    
-    # Load tracking locations
-    tracking_file = f"{subject_name}_tracking_locations.json"
-    if not Path(tracking_file).exists():
-        print(f"Warning: No tracking locations file found: {tracking_file}")
+
+    # Load tracking locations from picked_points.json only (no legacy fallback)
+    results_dir = Path(f"{subject_name}_results")
+    tracking_file = results_dir / f"{subject_name}_picked_points.json"
+
+    if not tracking_file.exists():
+        print(f"Warning: No picked_points.json found: {tracking_file}")
         return {}, {}
-    
+
     with open(tracking_file, 'r') as f:
         tracking_data = json.load(f)
     
@@ -873,29 +823,25 @@ def load_cfd_data_for_analysis(subject_name: str, output_dir: Path, enable_patch
                 'description': description
             })
     
-    # Map descriptions to keys for compatibility
-    location_map = {
-        'Posterior border of soft palate': 'posterior_border_of_soft_palate',
-        'Back of tongue': 'back_of_tongue',
-        'Superior border of epiglottis': 'superior_border_of_epiglottis'
-    }
-    
-    # Load single point data
+    # Dynamically create location key from description (no hardcoded filter)
+    def description_to_key(desc: str) -> str:
+        """Convert description to a standardized key."""
+        return desc.lower().replace(' ', '_').replace('-', '_')
+
+    # Load single point data for ALL locations
     single_point_dfs = {}
     for location in tracking_locations:
         patch_number = location['patch_number']
         face_index = location['face_indices'][0]
         description = location['description']
-        
-        if description not in location_map:
-            continue
-            
+        location_key = description_to_key(description)
+
         # Load single point data
         data_file = output_dir / f"{subject_name}_patch{patch_number}_face{face_index}_{description.lower().replace(' ', '_')}.csv"
-        
+
         if data_file.exists():
             df = pd.read_csv(data_file)
-            single_point_dfs[location_map[description]] = df
+            single_point_dfs[location_key] = df
             print(f"Loaded single point data: {description}")
         else:
             print(f"Warning: No single point data file found for {description}")
@@ -910,11 +856,7 @@ def load_cfd_data_for_analysis(subject_name: str, output_dir: Path, enable_patch
             patch_number = location['patch_number']
             face_index = location['face_indices'][0]
             description = location['description']
-            
-            if description not in location_map:
-                continue
-            
-            location_key = location_map[description]
+            location_key = description_to_key(description)
             patch_dfs[location_key] = {}
             
             for radius in patch_radii:

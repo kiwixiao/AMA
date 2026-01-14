@@ -354,4 +354,235 @@ def plot_3d_interactive_all_patches(data_source, tracking_points, subject_name: 
         html_content = html_content.replace('</body>', custom_js + '</body>')
         f.write(html_content)
     
-    print(f"Saved interactive visualization with persistent selection: {html_filename}") 
+    print(f"Saved interactive visualization with persistent selection: {html_filename}")
+
+
+def visualize_remesh_comparison(
+    hdf5_path: str,
+    before_timestep_ms: float,
+    after_timestep_ms: float,
+    tracking_locations: list,
+    subject_name: str,
+    output_dir: Path,
+    remesh_event_num: int = 1
+) -> str:
+    """
+    Generate side-by-side HTML comparing before/after remesh point mapping.
+
+    Args:
+        hdf5_path: Path to HDF5 file
+        before_timestep_ms: Timestep (ms) before remesh
+        after_timestep_ms: Timestep (ms) after remesh
+        tracking_locations: List of tracking location dicts with post_remesh data
+        subject_name: Subject name for output files
+        output_dir: Directory to save HTML file
+        remesh_event_num: Which remesh event (1-indexed)
+
+    Returns:
+        Path to generated HTML file
+    """
+    from plotly.subplots import make_subplots
+
+    # Import data loading function
+    try:
+        from ..data_processing.trajectory import load_hdf5_data_for_html_plots
+    except ImportError:
+        import sys
+        import os
+        src_dir = os.path.dirname(os.path.dirname(__file__))
+        if str(src_dir) not in sys.path:
+            sys.path.insert(0, str(src_dir))
+        from data_processing.trajectory import load_hdf5_data_for_html_plots
+
+    print(f"\n📊 Generating remesh comparison visualization (Event {remesh_event_num})...")
+    print(f"   Before: {before_timestep_ms}ms, After: {after_timestep_ms}ms")
+
+    # Load data for both timesteps
+    df_before = load_hdf5_data_for_html_plots(str(hdf5_path), int(before_timestep_ms))
+    df_after = load_hdf5_data_for_html_plots(str(hdf5_path), int(after_timestep_ms))
+
+    if df_before is None or df_after is None:
+        print(f"❌ Failed to load HDF5 data for remesh comparison")
+        return None
+
+    # Create side-by-side subplots
+    fig = make_subplots(
+        rows=1, cols=2,
+        specs=[[{'type': 'scatter3d'}, {'type': 'scatter3d'}]],
+        subplot_titles=[
+            f'BEFORE Remesh (t={before_timestep_ms}ms)',
+            f'AFTER Remesh (t={after_timestep_ms}ms)'
+        ],
+        horizontal_spacing=0.05
+    )
+
+    colors = px.colors.qualitative.Set3
+
+    # Helper function to add surface traces
+    def add_surface_traces(df, col, opacity=0.5):
+        for patch_num in sorted(df['Patch Number'].unique()):
+            patch_mask = df['Patch Number'] == patch_num
+            patch_df = df[patch_mask]
+
+            if len(patch_df) == 0:
+                continue
+
+            fig.add_trace(
+                go.Scatter3d(
+                    x=patch_df['X (m)'].values,
+                    y=patch_df['Y (m)'].values,
+                    z=patch_df['Z (m)'].values,
+                    mode='markers',
+                    marker=dict(
+                        size=1,
+                        color=colors[int(patch_num) % len(colors)],
+                        opacity=opacity
+                    ),
+                    name=f'Patch {int(patch_num)}',
+                    showlegend=(col == 1),  # Only show legend for first plot
+                    hoverinfo='skip'  # Skip hover for surface points
+                ),
+                row=1, col=col
+            )
+
+    # Add surface for both views
+    add_surface_traces(df_before, col=1)
+    add_surface_traces(df_after, col=2)
+
+    # Add tracked points - BEFORE (original locations)
+    before_points = []
+    before_labels = []
+    before_hovers = []
+
+    for loc in tracking_locations:
+        desc = loc.get('description', 'Unknown')
+        patch = loc.get('patch_number', 0)
+        face = loc.get('face_indices', [0])[0]
+        coords = loc.get('coordinates', [0, 0, 0])
+
+        if coords and coords != [0, 0, 0] and coords != [0.0, 0.0, 0.0]:
+            before_points.append(coords)
+            before_labels.append(desc)
+            before_hovers.append(
+                f"<b>{desc}</b><br>"
+                f"Patch: {patch}<br>"
+                f"Face: {face}<br>"
+                f"X: {coords[0]:.6f}<br>"
+                f"Y: {coords[1]:.6f}<br>"
+                f"Z: {coords[2]:.6f}"
+            )
+
+    if before_points:
+        before_points = np.array(before_points)
+        fig.add_trace(
+            go.Scatter3d(
+                x=before_points[:, 0],
+                y=before_points[:, 1],
+                z=before_points[:, 2],
+                mode='markers+text',
+                marker=dict(size=10, color='red', symbol='diamond'),
+                text=before_labels,
+                textposition="top center",
+                textfont=dict(size=10, color='darkred'),
+                name='Original Points',
+                hovertext=before_hovers,
+                hoverinfo='text'
+            ),
+            row=1, col=1
+        )
+
+    # Add tracked points - AFTER (mapped locations)
+    after_points = []
+    after_labels = []
+    after_hovers = []
+
+    for loc in tracking_locations:
+        desc = loc.get('description', 'Unknown')
+
+        # Get post_remesh data (handle both single and multiple remesh)
+        post_remesh = loc.get('post_remesh')
+        post_remesh_list = loc.get('post_remesh_list', [])
+
+        if post_remesh_list and len(post_remesh_list) >= remesh_event_num:
+            mapping = post_remesh_list[remesh_event_num - 1]
+        elif post_remesh:
+            mapping = post_remesh
+        else:
+            continue
+
+        if not mapping:
+            continue
+
+        new_patch = mapping.get('patch_number', 0)
+        new_face = mapping.get('face_index', 0)
+        new_coords = mapping.get('coordinates', [0, 0, 0])
+        distance = mapping.get('distance_mm', mapping.get('distance', 0))
+
+        if new_coords and new_coords != [0, 0, 0]:
+            after_points.append(new_coords)
+            after_labels.append(desc)
+            after_hovers.append(
+                f"<b>{desc}</b><br>"
+                f"New Patch: {new_patch}<br>"
+                f"New Face: {new_face}<br>"
+                f"X: {new_coords[0]:.6f}<br>"
+                f"Y: {new_coords[1]:.6f}<br>"
+                f"Z: {new_coords[2]:.6f}<br>"
+                f"<b>Mapping Distance: {distance:.3f}mm</b>"
+            )
+
+    if after_points:
+        after_points = np.array(after_points)
+        fig.add_trace(
+            go.Scatter3d(
+                x=after_points[:, 0],
+                y=after_points[:, 1],
+                z=after_points[:, 2],
+                mode='markers+text',
+                marker=dict(size=10, color='blue', symbol='diamond'),
+                text=after_labels,
+                textposition="top center",
+                textfont=dict(size=10, color='darkblue'),
+                name='Mapped Points',
+                hovertext=after_hovers,
+                hoverinfo='text'
+            ),
+            row=1, col=2
+        )
+
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=f'Remesh Point Mapping Verification - {subject_name} (Event {remesh_event_num})<br>'
+                 f'<sub>Red diamonds = original points | Blue diamonds = mapped points | Hover for details</sub>',
+            x=0.5
+        ),
+        width=1600,
+        height=800,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="right",
+            x=0.99
+        )
+    )
+
+    # Update 3D scene settings for both subplots
+    scene_settings = dict(
+        aspectmode='data',
+        xaxis_title='X (m)',
+        yaxis_title='Y (m)',
+        zaxis_title='Z (m)'
+    )
+    fig.update_scenes(scene_settings)
+
+    # Save HTML
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    html_filename = output_dir / f'{subject_name}_remesh_{remesh_event_num}_comparison_t{int(before_timestep_ms)}_t{int(after_timestep_ms)}.html'
+
+    fig.write_html(str(html_filename))
+    print(f"✅ Saved remesh comparison: {html_filename}")
+
+    return str(html_filename)

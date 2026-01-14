@@ -94,8 +94,9 @@ def find_tracking_locations_file(subject_name: str) -> Optional[Path]:
 
     PRODUCTION MODE: Only search in results folder for self-contained subject data.
 
-    Search order:
-    1. {subject_name}_results/{subject_name}_tracking_locations.json
+    Search order (new format preferred):
+    1. {subject_name}_results/{subject_name}_picked_points.json (new format)
+    2. {subject_name}_results/{subject_name}_tracking_locations.json (legacy)
 
     Args:
         subject_name: Subject name (potentially with mesh variant)
@@ -104,16 +105,22 @@ def find_tracking_locations_file(subject_name: str) -> Optional[Path]:
         Path to tracking locations file, or None if not found
     """
     # PRODUCTION MODE: Only check results folder
-    results_file = Path(f"{subject_name}_results/{subject_name}_tracking_locations.json")
+    # Prefer new format (picked_points.json)
+    picked_points_file = Path(f"{subject_name}_results/{subject_name}_picked_points.json")
+    legacy_file = Path(f"{subject_name}_results/{subject_name}_tracking_locations.json")
 
     print(f"🔍 Searching for tracking locations for subject: {subject_name}")
 
-    if results_file.exists():
-        print(f"✅ Found in results folder: {results_file}")
-        return results_file
+    if picked_points_file.exists():
+        print(f"✅ Found picked_points.json: {picked_points_file}")
+        return picked_points_file
+
+    if legacy_file.exists():
+        print(f"✅ Found legacy tracking_locations.json: {legacy_file}")
+        return legacy_file
 
     print(f"❌ No tracking locations found for {subject_name}")
-    print(f"   Expected location: {results_file}")
+    print(f"   Expected location: {picked_points_file}")
     print(f"   Run --patch-selection first to create template JSON")
     return None
 
@@ -350,16 +357,27 @@ def create_template_tracking_locations(subject_name: str, output_dir: Path = Non
 
     # Add remesh_info if available
     if has_remesh:
+        # Convert Path objects to strings for JSON serialization
+        remesh_before = remesh_info.get('remesh_before_file')
+        remesh_after = remesh_info.get('remesh_after_file')
         template["remesh_info"] = {
             "has_remesh": True,
-            "remesh_before_file": remesh_info.get('remesh_before_file'),
-            "remesh_after_file": remesh_info.get('remesh_after_file'),
+            "remesh_before_file": str(remesh_before) if remesh_before else None,
+            "remesh_after_file": str(remesh_after) if remesh_after else None,
             "remesh_timestep_ms": remesh_info.get('remesh_timestep_ms'),
             "_note": "post_remesh fields will be auto-populated when you run --plotting"
         }
         # Include remesh_events list if available (for multiple remesh events)
         if remesh_info.get('remesh_events'):
-            template["remesh_info"]["remesh_events"] = remesh_info['remesh_events']
+            # Convert any Path objects in remesh_events to strings
+            events = []
+            for event in remesh_info['remesh_events']:
+                event_copy = dict(event)
+                for key in ['remesh_before_file', 'remesh_after_file']:
+                    if key in event_copy and event_copy[key] is not None:
+                        event_copy[key] = str(event_copy[key])
+                events.append(event_copy)
+            template["remesh_info"]["remesh_events"] = events
         template["_instructions"]["step7"] = "For remesh cases: post_remesh mappings are auto-calculated from coordinates"
     else:
         template["remesh_info"] = {
@@ -628,16 +646,25 @@ def update_tracking_locations_for_multiple_remesh(tracking_config: Dict,
     for event_idx, event in enumerate(remesh_events):
         before_file = event['before_file']
         after_file = event['after_file']
-        timestep_ms = event['timestep_ms']
+        # Handle both timestep_ms (HDF5 native) and timestep_boundary (from metadata.json)
+        timestep_ms = event.get('timestep_ms') or event.get('timestep_boundary', 0)
 
         print(f"\n   {'─'*40}")
         print(f"   Remesh Event #{event_idx + 1}: boundary at {timestep_ms:.1f}ms")
         print(f"   Before: {before_file}")
         print(f"   After:  {after_file}")
 
-        # Find the CSV files
-        before_csv = xyz_tables_dir / before_file
-        after_csv = xyz_tables_dir / after_file
+        # Find the CSV files - handle both full path and basename formats
+        # The event may store full path (OSAMRI007_xyz_tables/XYZ_...) or just basename
+        before_path = Path(before_file)
+        after_path = Path(after_file)
+
+        # Use basename if the stored path already includes directory
+        before_basename = before_path.name
+        after_basename = after_path.name
+
+        before_csv = xyz_tables_dir / before_basename
+        after_csv = xyz_tables_dir / after_basename
 
         if not before_csv.exists():
             print(f"   ❌ Before file not found: {before_csv}")
@@ -986,22 +1013,26 @@ def ask_remesh_questions_interactive(xyz_files: list) -> dict:
     # Restore default tab completion
     restore_tab_completion()
 
+    # Helper to get timestep from event (handles both formats)
+    def get_event_ts(evt):
+        return evt.get('timestep_ms') or evt.get('timestep_boundary', 0)
+
     # Sort remesh events by timestep
-    result['remesh_events'].sort(key=lambda e: e['timestep_ms'])
+    result['remesh_events'].sort(key=lambda e: get_event_ts(e))
 
     # Backward compatibility: populate single-remesh fields from first event
     if result['remesh_events']:
         first_event = result['remesh_events'][0]
         result['remesh_before_file'] = first_event['before_file']
         result['remesh_after_file'] = first_event['after_file']
-        result['remesh_timestep_ms'] = first_event['timestep_ms']
+        result['remesh_timestep_ms'] = get_event_ts(first_event)
 
     # Split files into chunks based on all remesh events
     # For backward compatibility, pre_remesh_files = before first remesh
     # post_remesh_files = after last remesh
     if result['remesh_events']:
-        first_boundary = result['remesh_events'][0]['timestep_ms']
-        last_boundary = result['remesh_events'][-1]['timestep_ms']
+        first_boundary = get_event_ts(result['remesh_events'][0])
+        last_boundary = get_event_ts(result['remesh_events'][-1])
 
         result['pre_remesh_files'] = []
         result['post_remesh_files'] = []
@@ -1017,7 +1048,7 @@ def ask_remesh_questions_interactive(xyz_files: list) -> dict:
     print(f"✅ Remesh configuration complete:")
     print(f"   Total remesh events: {len(result['remesh_events'])}")
     for i, event in enumerate(result['remesh_events'], 1):
-        print(f"   #{i}: boundary at {event['timestep_ms']:.1f}ms")
+        print(f"   #{i}: boundary at {get_event_ts(event):.1f}ms")
         print(f"       before: {event['before_file']}")
         print(f"       after:  {event['after_file']}")
     print(f"{'='*60}")
@@ -1510,9 +1541,8 @@ def detect_remesh_from_file_sizes(xyz_files: List[Path],
     """
     Detect remesh events by scanning file sizes in chronological order.
 
-    A 2% or greater file size change indicates a remesh.
-    Small variations (<2%) are ignored as they may be due to floating point
-    precision differences in data values, not mesh changes.
+    A 2% or greater file size change indicates a remesh boundary.
+    Each transition where consecutive files differ by >threshold is a remesh event.
 
     Args:
         xyz_files: List of XYZ table files (should be in chronological order)
@@ -1523,8 +1553,8 @@ def detect_remesh_from_file_sizes(xyz_files: List[Path],
             'has_remesh': bool,
             'remesh_events': [
                 {
-                    'before_file': Path,
-                    'after_file': Path,
+                    'before_file': str,
+                    'after_file': str,
                     'before_size': int,
                     'after_size': int,
                     'size_change_percent': float,
@@ -1586,8 +1616,8 @@ def detect_remesh_from_file_sizes(xyz_files: List[Path],
                 timestep = float(i + 1)  # Fallback to index
 
             remesh_events.append({
-                'before_file': before_file,
-                'after_file': after_file,
+                'before_file': str(before_file),
+                'after_file': str(after_file),
                 'before_size': before_size,
                 'after_size': after_size,
                 'size_change_percent': size_change_percent,
@@ -2441,37 +2471,19 @@ def load_and_merge_configs(subject_name: str, results_dir: Path = None) -> Dict:
 
         return merged_config
 
-    # Fall back to legacy tracking_locations.json
-    legacy_path = results_dir / f"{subject_name}_tracking_locations.json"
-    if legacy_path.exists():
-        print(f"📂 Using legacy tracking_locations.json format")
-        with open(legacy_path, 'r') as f:
-            legacy_config = json.load(f)
-            legacy_config["source"] = "legacy_tracking_locations"
-            return legacy_config
-
-    # Also check root directory for backward compatibility
-    root_legacy_path = Path(f"{subject_name}_tracking_locations.json")
-    if root_legacy_path.exists():
-        print(f"📂 Using legacy tracking_locations.json from root directory")
-        with open(root_legacy_path, 'r') as f:
-            legacy_config = json.load(f)
-            legacy_config["source"] = "legacy_root"
-            return legacy_config
-
-    # No config found
-    print(f"❌ No tracking configuration found for {subject_name}")
-    print(f"   Expected files:")
-    print(f"   - {results_dir}/{subject_name}_picked_points.json")
-    print(f"   - {results_dir}/{subject_name}_metadata.json")
-    print(f"   Or legacy: {results_dir}/{subject_name}_tracking_locations.json")
+    # No config found - new format required
+    print(f"❌ No picked_points.json found for {subject_name}")
+    print(f"   Expected files in {results_dir}/:")
+    print(f"   - {subject_name}_picked_points.json (user-editable locations)")
+    print(f"   - {subject_name}_metadata.json (system metadata)")
+    print(f"   Run --point-picker to select anatomical landmarks")
 
     return {
         "subject": subject_name,
         "source": "none",
         "locations": [],
         "combinations": [],
-        "error": "No tracking configuration found"
+        "error": "No picked_points.json found"
     }
 
 

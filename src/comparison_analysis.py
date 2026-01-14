@@ -21,22 +21,8 @@ from typing import Dict, List, Optional, Tuple
 import json
 import sys
 
-
-def find_zero_crossings(times, values):
-    """Find the times when values cross zero."""
-    zero_crossings = np.where(np.diff(np.signbit(values)))[0]
-    crossing_times = []
-    
-    for idx in zero_crossings:
-        if idx + 1 < len(times) and idx >= 0:
-            t0, t1 = times[idx], times[idx + 1]
-            v0, v1 = values[idx], values[idx + 1]
-            
-            if v1 != v0:
-                t_cross = t0 - v0 * (t1 - t0) / (v1 - v0)
-                crossing_times.append(t_cross)
-    
-    return crossing_times
+# Import shared utilities
+from utils.signal_processing import find_zero_crossings
 
 
 def load_comparison_data(subject_name: str, folder_path: Path, folder_label: str) -> Dict:

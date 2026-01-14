@@ -50,13 +50,9 @@ class PointPickerGUI(QMainWindow):
         else:
             self.h5_path = self.results_dir / f"{subject_name}_cfd_data.h5"
 
-        # Use picked_points.json if it exists, otherwise fall back to tracking_locations.json
-        picked_points_path = self.results_dir / f"{subject_name}_picked_points.json"
-        if picked_points_path.exists():
-            self.tracking_json_path = picked_points_path
-            print(f"📄 Using picked_points.json format")
-        else:
-            self.tracking_json_path = self.results_dir / f"{subject_name}_tracking_locations.json"
+        # Use picked_points.json only (no legacy fallback)
+        self.tracking_json_path = self.results_dir / f"{subject_name}_picked_points.json"
+        print(f"📄 Using picked_points.json")
 
         # Data storage
         self.picked_points: List[Dict] = []
