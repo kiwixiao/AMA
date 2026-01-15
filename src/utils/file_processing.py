@@ -5,6 +5,7 @@ from typing import List, Tuple, Dict, Optional
 import json
 import matplotlib.pyplot as plt
 import re
+import h5py
 
 def extract_base_subject(subject_name: str) -> str:
     """
@@ -477,6 +478,123 @@ def find_closest_point_after_remesh(target_coords: Tuple[float, float, float],
     }
 
 
+def find_closest_point_after_remesh_hdf5(target_coords: Tuple[float, float, float],
+                                          hdf5_file_path: str,
+                                          timestep_ms: float,
+                                          max_distance: float = 0.005) -> Optional[Dict]:
+    """
+    Find the closest point in HDF5 data to the target coordinates at a specific timestep.
+
+    This is used for remesh handling - when the CFD mesh changes during simulation,
+    the patch_number and face_index change but the physical location stays the same.
+    We use coordinates to find the corresponding point in the new mesh.
+
+    Args:
+        target_coords: (x, y, z) coordinates to match
+        hdf5_file_path: Path to the HDF5 file containing CFD data
+        timestep_ms: Timestep in milliseconds to search in (after remesh)
+        max_distance: Maximum allowed distance (meters) for a valid match (default: 5mm)
+
+    Returns:
+        Dictionary with matched point info, or None if no match found
+        {
+            'patch_number': int,
+            'face_index': int,
+            'coordinates': [x, y, z],
+            'distance': float  # distance from target
+        }
+    """
+    try:
+        with h5py.File(hdf5_file_path, 'r') as f:
+            # Get column names from attributes
+            if 'column_names' not in f.attrs:
+                print(f"❌ HDF5 file missing column_names attribute")
+                return None
+
+            properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p)
+                          for p in f.attrs['column_names']]
+
+            # Find required column indices
+            try:
+                x_idx = next(i for i, p in enumerate(properties) if p in ['X (m)', 'Position[X] (m)'])
+                y_idx = next(i for i, p in enumerate(properties) if p in ['Y (m)', 'Position[Y] (m)'])
+                z_idx = next(i for i, p in enumerate(properties) if p in ['Z (m)', 'Position[Z] (m)'])
+                face_idx = next(i for i, p in enumerate(properties) if p == 'Face Index')
+            except StopIteration:
+                print(f"❌ HDF5 file missing required columns (X, Y, Z, Face Index)")
+                return None
+
+            # Find Patch Number index (may not exist - we'll compute if needed)
+            patch_idx = None
+            try:
+                patch_idx = next(i for i, p in enumerate(properties) if p == 'Patch Number')
+            except StopIteration:
+                pass  # Will compute from Face Index resets
+
+            # Find timestep index
+            time_points = f['time_points'][:]
+            target_time_s = timestep_ms / 1000.0
+            time_idx = np.argmin(np.abs(time_points - target_time_s))
+
+            # Load single timestep data
+            timestep_data = f['cfd_data'][time_idx, :, :]
+
+            # Filter NaN padding (remesh creates variable point counts)
+            valid_mask = ~np.isnan(timestep_data[:, 0])
+            valid_data = timestep_data[valid_mask]
+
+            if len(valid_data) == 0:
+                print(f"❌ No valid data at timestep {timestep_ms}ms")
+                return None
+
+            # Calculate distances from target coordinates
+            target_x, target_y, target_z = target_coords
+            distances = np.sqrt(
+                (valid_data[:, x_idx] - target_x)**2 +
+                (valid_data[:, y_idx] - target_y)**2 +
+                (valid_data[:, z_idx] - target_z)**2
+            )
+
+            # Find minimum distance
+            min_idx = np.argmin(distances)
+            min_distance = distances[min_idx]
+
+            if min_distance > max_distance:
+                print(f"⚠️  Closest point is {min_distance*1000:.2f}mm away (max: {max_distance*1000:.2f}mm)")
+                return None
+
+            matched_point = valid_data[min_idx]
+
+            # Get or compute patch number
+            if patch_idx is not None:
+                patch_number = int(matched_point[patch_idx])
+            else:
+                # Compute patch number from Face Index resets
+                face_indices = valid_data[:, face_idx].astype(int)
+                patch_numbers = np.ones(len(face_indices), dtype=int)
+                current_patch = 1
+                for i in range(1, len(face_indices)):
+                    if face_indices[i] == 0 and face_indices[i-1] > 0:
+                        current_patch += 1
+                    patch_numbers[i] = current_patch
+                patch_number = patch_numbers[min_idx]
+
+            return {
+                'patch_number': patch_number,
+                'face_index': int(matched_point[face_idx]),
+                'coordinates': [
+                    float(matched_point[x_idx]),
+                    float(matched_point[y_idx]),
+                    float(matched_point[z_idx])
+                ],
+                'distance': float(min_distance)
+            }
+
+    except Exception as e:
+        print(f"❌ Error reading HDF5 file {hdf5_file_path}: {e}")
+        return None
+
+
 def update_tracking_locations_for_remesh(tracking_config: Dict,
                                          before_csv: Path,
                                          after_csv: Path,
@@ -748,6 +866,149 @@ def update_tracking_locations_for_multiple_remesh(tracking_config: Dict,
                         if loc.get('post_remesh_list') and all(m is not None for m in loc['post_remesh_list']))
 
     print(f"\n✅ Multi-remesh mapping complete:")
+    print(f"   {success_count}/{len(updated_config['locations'])} locations fully mapped")
+    print(f"   {len(remesh_events)} remesh event(s) processed")
+    return updated_config
+
+
+def update_tracking_locations_for_remesh_hdf5(tracking_config: Dict,
+                                               hdf5_file_path: str,
+                                               remesh_events: list,
+                                               max_distance: float = 0.005) -> Dict:
+    """
+    Update tracking locations for multiple remesh events using HDF5 data.
+
+    This is the HDF5 version - it reads directly from the cached HDF5 file
+    instead of going back to raw CSV files. This makes Phase 2 self-contained.
+
+    For each remesh event, calculates the post-remesh mapping using the coordinates
+    from the before-remesh timestep. Builds a post_remesh_list with one mapping
+    per remesh event.
+
+    Args:
+        tracking_config: Current tracking locations config
+        hdf5_file_path: Path to HDF5 file containing CFD data
+        remesh_events: List of remesh events, each with {timestep_ms or timestep_boundary}
+        max_distance: Maximum allowed distance for coordinate matching
+
+    Returns:
+        Updated tracking config with post_remesh_list for each location
+    """
+    if not remesh_events:
+        return tracking_config
+
+    print(f"\n🔄 Calculating post-remesh mappings from HDF5 for {len(remesh_events)} remesh event(s)...")
+
+    updated_config = tracking_config.copy()
+
+    # Initialize post_remesh_list for each location
+    for i in range(len(updated_config['locations'])):
+        updated_config['locations'][i]['post_remesh_list'] = []
+
+    # Update remesh_info
+    if 'remesh_info' not in updated_config:
+        updated_config['remesh_info'] = {}
+    updated_config['remesh_info']['has_remesh'] = True
+    updated_config['remesh_info']['remesh_events'] = remesh_events
+    updated_config['remesh_info']['mappings'] = []
+
+    # Helper to get timestep from event (handles both key formats)
+    def get_event_ts(evt):
+        return evt.get('timestep_ms') or evt.get('timestep_boundary', 0)
+
+    # Process each remesh event
+    for event_idx, event in enumerate(remesh_events):
+        timestep_ms = get_event_ts(event)
+
+        print(f"\n   {'─'*40}")
+        print(f"   Remesh Event #{event_idx + 1}: boundary at {timestep_ms:.1f}ms")
+        print(f"   (searching in HDF5 at timestep {timestep_ms:.1f}ms)")
+
+        # For first event, use original coordinates
+        # For subsequent events, use the previous post_remesh coordinates
+        for i, location in enumerate(updated_config['locations']):
+            description = location.get('description', f'Location {i+1}')
+
+            if event_idx == 0:
+                # First remesh: use original coordinates
+                if 'coordinates' in location and location['coordinates'] != [0.0, 0.0, 0.0]:
+                    coords = tuple(location['coordinates'])
+                    source = "original"
+                else:
+                    # Try to get coordinates from HDF5 at a pre-remesh timestep
+                    print(f"      {description}: ⚠️  No coordinates in config, attempting HDF5 lookup...")
+                    patch_num = location['patch_number']
+                    face_idx = location['face_indices'][0]
+
+                    # Get a timestep just before the remesh
+                    pre_remesh_ts = max(0, timestep_ms - 1)
+                    try:
+                        with h5py.File(hdf5_file_path, 'r') as f:
+                            properties = [p.decode('utf-8') if isinstance(p, bytes) else str(p)
+                                          for p in f.attrs['column_names']]
+                            x_idx = next(i for i, p in enumerate(properties) if p in ['X (m)', 'Position[X] (m)'])
+                            y_idx = next(i for i, p in enumerate(properties) if p in ['Y (m)', 'Position[Y] (m)'])
+                            z_idx = next(i for i, p in enumerate(properties) if p in ['Z (m)', 'Position[Z] (m)'])
+                            face_col_idx = next(i for i, p in enumerate(properties) if p == 'Face Index')
+                            patch_col_idx = next(i for i, p in enumerate(properties) if p == 'Patch Number')
+
+                            time_points = f['time_points'][:]
+                            target_time_s = pre_remesh_ts / 1000.0
+                            time_idx = np.argmin(np.abs(time_points - target_time_s))
+
+                            timestep_data = f['cfd_data'][time_idx, :, :]
+                            valid_mask = ~np.isnan(timestep_data[:, 0])
+                            valid_data = timestep_data[valid_mask]
+
+                            # Find matching patch/face
+                            patch_match = valid_data[:, patch_col_idx] == patch_num
+                            face_match = valid_data[:, face_col_idx] == face_idx
+                            combined = patch_match & face_match
+                            if np.any(combined):
+                                matched = valid_data[combined][0]
+                                coords = (matched[x_idx], matched[y_idx], matched[z_idx])
+                                updated_config['locations'][i]['coordinates'] = list(coords)
+                                source = "HDF5 lookup"
+                            else:
+                                print(f"      {description}: ❌ No coordinates found, skipping")
+                                continue
+                    except Exception as e:
+                        print(f"      {description}: ❌ Error getting coordinates: {e}")
+                        continue
+            else:
+                # Subsequent remesh: use previous post_remesh coordinates
+                prev_mapping = updated_config['locations'][i]['post_remesh_list'][-1] if updated_config['locations'][i]['post_remesh_list'] else None
+                if prev_mapping and 'coordinates' in prev_mapping:
+                    coords = tuple(prev_mapping['coordinates'])
+                    source = f"post_remesh_{event_idx}"
+                else:
+                    print(f"      {description}: ❌ No previous mapping, skipping")
+                    continue
+
+            # Find closest point in after-remesh data using HDF5
+            match = find_closest_point_after_remesh_hdf5(coords, hdf5_file_path, timestep_ms, max_distance)
+
+            if match is None:
+                print(f"      {description}: ❌ No match within {max_distance*1000:.1f}mm")
+                updated_config['locations'][i]['post_remesh_list'].append(None)
+                continue
+
+            mapping = {
+                'event_index': event_idx,
+                'patch_number': match['patch_number'],
+                'face_index': match['face_index'],
+                'coordinates': match['coordinates'],
+                'distance_mm': match['distance'] * 1000
+            }
+            updated_config['locations'][i]['post_remesh_list'].append(mapping)
+
+            print(f"      {description}: Patch {match['patch_number']}, Face {match['face_index']} ({match['distance']*1000:.2f}mm)")
+
+    # Count successes
+    success_count = sum(1 for loc in updated_config['locations']
+                        if loc.get('post_remesh_list') and all(m is not None for m in loc['post_remesh_list']))
+
+    print(f"\n✅ Multi-remesh mapping complete (HDF5):")
     print(f"   {success_count}/{len(updated_config['locations'])} locations fully mapped")
     print(f"   {len(remesh_events)} remesh event(s) processed")
     return updated_config

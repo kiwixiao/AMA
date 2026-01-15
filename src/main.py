@@ -92,6 +92,7 @@ try:
         create_cfd_analysis_3x3_panel_with_markers,
         create_cfd_analysis_3x3_panel_original_scale,
         create_cfd_analysis_3x3_panel_with_markers_original_scale,
+        create_cfd_analysis_3x3_panel_with_markers_both_time_versions,
         load_cfd_data_for_analysis
     )
     CFD_ANALYSIS_AVAILABLE = True
@@ -3244,77 +3245,72 @@ def create_airway_surface_analysis_plot(df, subject_name, description, patch_num
             
     plt.close()
 
-def create_clean_flow_profile_plot(subject_name, output_dir=None, pdfs_dir=None):
+def create_clean_flow_profile_plot(subject_name, hdf5_file_path, results_dir, output_dir=None, pdfs_dir=None):
     """
     Create a clean, smoothed flow profile plot showing just one breathing cycle.
-    Clips exactly at zero crossings and converts flow rate from kg/s to L/min.
-    
+    Reads data from HDF5 and uses pre-detected breathing cycle from metadata.json.
+    Converts flow rate from kg/s to L/min.
+
     Arguments:
         subject_name: Name of the subject
-        output_dir: Directory to save output files (optional)
+        hdf5_file_path: Path to the HDF5 file containing flow profile data
+        results_dir: Path to results directory containing metadata.json
+        output_dir: Directory to save PNG files (optional)
+        pdfs_dir: Directory to save PDF files (optional)
     """
     print(f"\nGenerating clean flow profile visualization for {subject_name}...")
-    
-    # Load flow profile data using smart resolution
-    from utils.file_processing import find_flow_profile_file, extract_base_subject
-    
-    # Try to find smoothed flow profile first
-    base_subject = extract_base_subject(subject_name)
-    smoothed_candidates = [
-        f"{subject_name}FlowProfile_smoothed.csv",
-        f"{base_subject}FlowProfile_smoothed.csv"
-    ]
-    
-    flow_profile_path = None
-    for candidate in smoothed_candidates:
-        if Path(candidate).exists():
-            flow_profile_path = candidate
-            break
-    
-    if flow_profile_path is None:
-        print(f"❌ No smoothed flow profile found for {subject_name}")
+
+    # Load flow profile data from HDF5
+    from data_processing.trajectory import get_flow_profile, has_flow_profile
+
+    if not has_flow_profile(hdf5_file_path):
+        print(f"❌ No flow profile found in HDF5 for {subject_name}")
         return
-    
-    print(f"📊 Using flow profile: {flow_profile_path}")
-    flow_profile = pd.read_csv(flow_profile_path)
-    flow_times = flow_profile['time (s)'].values
-    flow_rates = flow_profile['Massflowrate (kg/s)'].values
-    
-    # Find zero crossings in the flow profile (where flow_rate = 0)
-    zero_crossings_idx = np.where(np.diff(np.signbit(flow_rates)))[0]
-    
-    if len(zero_crossings_idx) < 3:
-        print("Warning: Could not find enough zero crossings in flow profile to isolate a clean breathing cycle")
+
+    flow_df = get_flow_profile(hdf5_file_path)
+    if flow_df is None:
+        print(f"❌ Could not read flow profile from HDF5 for {subject_name}")
         return
-    
-    # We need at least 3 zero crossings to define one full breathing cycle
-    # 1. Zero crossing: Start of inhale (flow crosses from negative to positive)
-    # 2. Zero crossing: End of inhale/start of exhale (flow crosses from positive to negative)
-    # 3. Zero crossing: End of exhale/start of next inhale (flow crosses from negative to positive)
-    
-    # For a clean cycle, clip exactly at the first and third zero crossings
-    start_idx = zero_crossings_idx[0]  # First zero crossing
-    end_idx = zero_crossings_idx[2]    # Third zero crossing
-    
-    # Find the exact zero crossing times using interpolation
-    zero_times = []
-    for idx in [start_idx, zero_crossings_idx[1], end_idx]:
-        t0, t1 = flow_times[idx], flow_times[idx + 1]
-        v0, v1 = flow_rates[idx], flow_rates[idx + 1]
-        
-        # Linear interpolation to find t where v = 0
-        if v1 != v0:  # Avoid division by zero
-            t_cross = t0 - v0 * (t1 - t0) / (v1 - v0)
-        else:
-            t_cross = t0
-        zero_times.append(t_cross)
-    
-    # Extract the clean cycle (including exactly one full breathing cycle)
-    # Use binary search to find the indices closest to our interpolated zero crossing times
+
+    print(f"📊 Using flow profile from HDF5: {hdf5_file_path}")
+    flow_times = flow_df['time (s)'].values
+    flow_rates = flow_df['Massflowrate (kg/s)'].values
+
+    # Read pre-detected zero crossings from metadata.json
+    metadata_path = Path(results_dir) / f"{subject_name}_metadata.json"
+    if not metadata_path.exists():
+        print(f"❌ No metadata.json found for {subject_name}")
+        return
+
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    breathing_cycle = metadata.get('breathing_cycle', {})
+    zero_crossings_ms = breathing_cycle.get('zero_crossings_ms', [])
+
+    if len(zero_crossings_ms) < 3:
+        print(f"❌ Not enough zero crossings in metadata.json (need 3, got {len(zero_crossings_ms)})")
+        return
+
+    # Convert from ms to seconds
+    zero_times = [t / 1000.0 for t in zero_crossings_ms[:3]]  # [start, transition, end]
+
+    print(f"📊 Using pre-detected breathing cycle: {zero_times[0]:.3f}s - {zero_times[2]:.3f}s")
+
+    # Extract the clean cycle using pre-detected boundaries
+    # Find indices closest to zero crossings
     start_idx = np.searchsorted(flow_times, zero_times[0])
     inhale_exhale_idx = np.searchsorted(flow_times, zero_times[1])
     end_idx = np.searchsorted(flow_times, zero_times[2])
-    
+
+    # Adjust to start AFTER first zero crossing (where flow becomes negative for inhale)
+    # and end BEFORE last zero crossing (where flow is still positive for exhale)
+    # This ensures we only show data WITHIN the breathing cycle
+    if start_idx < len(flow_rates) and flow_rates[start_idx] > 0:
+        start_idx += 1  # Skip pre-zero-crossing point
+    if end_idx > 0 and flow_rates[end_idx] < 0:
+        end_idx -= 1  # Skip post-zero-crossing point
+
     clean_times = flow_times[start_idx:end_idx+1]
     clean_rates = flow_rates[start_idx:end_idx+1]
     
@@ -3354,12 +3350,9 @@ def create_clean_flow_profile_plot(subject_name, output_dir=None, pdfs_dir=None)
     
     # Create the plot
     fig, ax = plt.figure(figsize=(12, 8)), plt.gca()
-    
-    # Plot the smoothed flow profile
+
+    # Plot ONLY the smoothed flow profile (no reference line - clean plot shows only smoothed data)
     ax.plot(normalized_times, smoothed_rates_lpm, 'b-', linewidth=2.5, label='Smoothed Flow Rate')
-    
-    # Add the original data as a lighter line for reference
-    ax.plot(normalized_times, clean_rates_lpm, 'lightblue', linewidth=1, alpha=0.5, label='Original Flow Rate')
     
     # Add a horizontal line at y=0
     ax.axhline(y=0, color='k', linestyle='--', alpha=0.5)
@@ -3423,8 +3416,117 @@ def create_clean_flow_profile_plot(subject_name, output_dir=None, pdfs_dir=None)
         print(f"Saved PNG: {output_filename}")
     
     plt.close()
-    
+
     return standalone_filename
+
+
+def create_original_flow_profile_plot(subject_name, hdf5_file_path, results_dir, output_dir=None, pdfs_dir=None):
+    """
+    Create an original (raw) flow profile plot showing FULL data without cycle extraction.
+    Reads data from HDF5. NO smoothing applied.
+    Converts flow rate from kg/s to L/min.
+    Marks detected zero crossings for reference.
+
+    Arguments:
+        subject_name: Name of the subject
+        hdf5_file_path: Path to the HDF5 file containing flow profile data
+        results_dir: Path to results directory containing metadata.json
+        output_dir: Directory to save PNG files (optional)
+        pdfs_dir: Directory to save PDF files (optional)
+    """
+    print(f"\nGenerating original flow profile visualization for {subject_name}...")
+
+    # Load flow profile data from HDF5
+    from data_processing.trajectory import get_flow_profile, has_flow_profile
+
+    if not has_flow_profile(hdf5_file_path):
+        print(f"❌ No flow profile found in HDF5 for {subject_name}")
+        return
+
+    flow_df = get_flow_profile(hdf5_file_path)
+    if flow_df is None:
+        print(f"❌ Could not read flow profile from HDF5 for {subject_name}")
+        return
+
+    print(f"📊 Using flow profile from HDF5: {hdf5_file_path}")
+    flow_times = flow_df['time (s)'].values
+    flow_rates = flow_df['Massflowrate (kg/s)'].values
+
+    # Convert from kg/s to L/min
+    air_density = 1.225  # kg/m³
+    conversion_factor = (1 / air_density) * 1000 * 60  # kg/s to L/min
+    flow_rates_lpm = flow_rates * conversion_factor
+
+    # Read pre-detected zero crossings from metadata.json for reference lines
+    metadata_path = Path(results_dir) / f"{subject_name}_metadata.json"
+    zero_crossings_s = []
+    if metadata_path.exists():
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+        breathing_cycle = metadata.get('breathing_cycle', {})
+        zero_crossings_ms = breathing_cycle.get('zero_crossings_ms', [])
+        zero_crossings_s = [t / 1000.0 for t in zero_crossings_ms]
+
+    # Create the plot
+    fig, ax = plt.figure(figsize=(14, 8)), plt.gca()
+
+    # Plot the raw flow profile (NO smoothing)
+    ax.plot(flow_times, flow_rates_lpm, 'b-', linewidth=1.5, label='Raw Flow Rate')
+
+    # Add a horizontal line at y=0
+    ax.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+
+    # Add vertical lines at detected zero crossings
+    colors = ['green', 'red', 'green']  # start, transition, end
+    labels = ['Cycle Start', 'Inhale→Exhale', 'Cycle End']
+    for i, t_cross in enumerate(zero_crossings_s[:3]):
+        color = colors[i] if i < len(colors) else 'gray'
+        label = labels[i] if i < len(labels) else f'Zero Crossing {i+1}'
+        ax.axvline(x=t_cross, color=color, linestyle='-', linewidth=2, alpha=0.7, label=f'{label} ({t_cross:.3f}s)')
+
+    # Add labels and title
+    ax.set_xlabel('Time (s)', fontsize=16.8, fontweight='bold')
+    ax.set_ylabel('Flow Rate (L/min)', fontsize=16.8, fontweight='bold')
+    ax.set_title(f'Original Flow Profile (Full Data) - {subject_name}', fontsize=16, fontweight='bold')
+
+    # Add info about data
+    fig.text(0.5, 0.01, f'Total data points: {len(flow_times)} | Time range: {flow_times[0]:.3f}s - {flow_times[-1]:.3f}s',
+            fontsize=10, ha='center', va='bottom')
+
+    # Add grid and legend
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right', fontsize=10)
+
+    # Format tick labels
+    ax.tick_params(axis='both', which='major', labelsize=13.44)
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontweight('bold')
+
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
+
+    # Save as a standalone PDF to pdfs directory
+    if pdfs_dir:
+        standalone_filename = pdfs_dir / f"{subject_name}_original_flow_profile.pdf"
+        plt.savefig(standalone_filename, bbox_inches='tight')
+        print(f"Saved standalone PDF: {standalone_filename}")
+    else:
+        standalone_filename = f"{subject_name}_original_flow_profile.pdf"
+        plt.savefig(standalone_filename, bbox_inches='tight')
+        print(f"Saved standalone PDF: {standalone_filename}")
+
+    # If we have an output directory, also save there
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True)
+        output_filename = output_dir / f"{subject_name}_original_flow_profile.png"
+        plt.savefig(output_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved PNG: {output_filename}")
+
+    plt.close()
+
+    return standalone_filename
+
 
 def detect_available_subjects() -> List[str]:
     """
@@ -4036,20 +4138,18 @@ def main(overwrite_existing: bool = False,
                         print(f"    After:  {after_name} ({event.get('after_size', 0):,} bytes)")
                     print(f"    Size change: {event.get('size_change_percent', 0):+.1f}%")
 
-                # Convert to remesh_info format for compatibility
+                # Convert to remesh_info format
                 remesh_info = {
                     'has_remesh': True,
-                    'remesh_events': events,
-                    'remesh_before_file': str(events[0].get('before_file', '')),
-                    'remesh_after_file': str(events[0].get('after_file', '')),
-                    'remesh_timestep_ms': events[0].get('timestep_boundary')
+                    'manual_remesh_timesteps_ms': [],  # Empty array template, e.g. [637, 638]
+                    'remesh_events': events
                 }
             else:
                 print(f"⚠ Remesh flagged but no event details found - continuing without remesh info")
-                remesh_info = {'has_remesh': False, 'remesh_events': []}
+                remesh_info = {'has_remesh': False, 'manual_remesh_timesteps_ms': [], 'remesh_events': []}
         else:
             print(f"✓ No remesh detected (max file size variation: {remesh_detection['max_size_variation_percent']:.1f}%, threshold: {remesh_detection['threshold_percent']:.0f}%)")
-            remesh_info = {'has_remesh': False, 'remesh_events': []}
+            remesh_info = {'has_remesh': False, 'manual_remesh_timesteps_ms': [], 'remesh_events': []}
 
         # Enhanced breathing cycle detection (supports 4 modes: A, B, C, M)
         print(f"\n🫁 Detecting breathing cycle...")
@@ -4248,21 +4348,36 @@ def main(overwrite_existing: bool = False,
 
         print(f"✅ Found HDF5 file: {hdf5_file_path}")
 
-        # Check if flow profile is in HDF5 (stored during Phase 1)
+        # Flow profile priority: 1) command line, 2) metadata.json, 3) HDF5 embedded
         from data_processing.trajectory import has_flow_profile, get_flow_profile
-        if not flow_profile_path and has_flow_profile(hdf5_file_path):
-            print(f"📊 Using flow profile embedded in HDF5 (no --flow-profile needed)")
-            # Create a temporary file for the flow profile
-            import tempfile
-            flow_df = get_flow_profile(hdf5_file_path)
-            if flow_df is not None:
-                temp_flow_file = Path(tempfile.gettempdir()) / f"{subject_name}_flow_profile_from_hdf5.csv"
-                flow_df.to_csv(temp_flow_file, index=False)
-                flow_profile_path = str(temp_flow_file)
-                print(f"   Extracted to: {temp_flow_file}")
-        elif not flow_profile_path:
-            print(f"⚠️  No flow profile provided and none found in HDF5")
-            print(f"   Some analysis features may be limited")
+
+        if flow_profile_path:
+            print(f"📊 Using flow profile from command line: {flow_profile_path}")
+        else:
+            # Check metadata.json for flow profile path
+            metadata_path = results_dir / f"{subject_name}_metadata.json"
+            if metadata_path.exists():
+                with open(metadata_path) as f:
+                    metadata_json = json.load(f)
+                flow_profile_from_meta = metadata_json.get('flow_profile_path')
+                if flow_profile_from_meta and Path(flow_profile_from_meta).exists():
+                    flow_profile_path = flow_profile_from_meta
+                    print(f"📊 Using flow profile from metadata.json: {flow_profile_path}")
+
+            # Fallback to HDF5 embedded flow profile
+            if not flow_profile_path and has_flow_profile(hdf5_file_path):
+                print(f"📊 Using flow profile embedded in HDF5")
+                import tempfile
+                flow_df = get_flow_profile(hdf5_file_path)
+                if flow_df is not None:
+                    temp_flow_file = Path(tempfile.gettempdir()) / f"{subject_name}_flow_profile_from_hdf5.csv"
+                    flow_df.to_csv(temp_flow_file, index=False)
+                    flow_profile_path = str(temp_flow_file)
+                    print(f"   Extracted to: {temp_flow_file}")
+
+            if not flow_profile_path:
+                print(f"⚠️  No flow profile found in: command line, metadata.json, or HDF5")
+                print(f"   Some analysis features may be limited")
 
         # Read remesh info from HDF5 (stored during Phase 1)
         from data_processing.trajectory import get_remesh_metadata
@@ -4280,11 +4395,28 @@ def main(overwrite_existing: bool = False,
 
         # Handle remesh: either from HDF5 metadata or from command line flags
         should_process_remesh = remesh_metadata.get('has_remesh', False) or has_remesh
-        remesh_events_from_hdf5 = remesh_metadata.get('remesh_events', [])
+
+        # Check for manual remesh override first from metadata.json (not HDF5)
+        # Priority: metadata.json manual_remesh_timesteps_ms > auto-detected remesh_events
+        manual_ts = []
+        metadata_path = results_dir / f"{subject_name}_metadata.json"
+        if metadata_path.exists():
+            with open(metadata_path) as f:
+                metadata_for_manual = json.load(f)
+            if 'remesh_info' in metadata_for_manual:
+                manual_ts = metadata_for_manual['remesh_info'].get('manual_remesh_timesteps_ms', [])
+
+        if manual_ts and isinstance(manual_ts, list) and len(manual_ts) > 0:
+            print(f"📊 Using manual remesh timesteps from metadata.json: {manual_ts}")
+            remesh_events_from_hdf5 = [{'timestep_ms': float(ts)} for ts in manual_ts]
+            should_process_remesh = True
+        else:
+            # Use auto-detected remesh events
+            remesh_events_from_hdf5 = remesh_metadata.get('remesh_events', [])
 
         if should_process_remesh:
             print(f"\n🔄 Remesh handling enabled")
-            from utils.file_processing import update_tracking_locations_for_remesh, update_tracking_locations_for_multiple_remesh
+            from utils.file_processing import update_tracking_locations_for_remesh_hdf5
 
             # Load current tracking config first to check if mappings already exist
             tracking_config = load_and_merge_configs(subject_name=subject_name, results_dir=results_dir)
@@ -4307,41 +4439,34 @@ def main(overwrite_existing: bool = False,
             elif all_placeholder:
                 print(f"   ⚠️  Tracking locations are placeholders - skipping remesh calculation")
                 print(f"   💡 Update tracking_locations.json with real coordinates, then re-run")
-            else:
-                # Find xyz_tables directory - only needed if we need to compute new mappings
-                # Priority: xyz_path > patched > default > raw_dir
-                xyz_dirs = [
-                    Path(xyz_path) if xyz_path else None,
-                    Path(f'{subject_name}_xyz_tables_with_patches'),
-                    Path(f'{subject_name}_xyz_tables'),
-                    Path(raw_dir) if raw_dir else None
-                ]
-                xyz_dirs = [d for d in xyz_dirs if d and d.exists()]
-                xyz_tables_dir = xyz_dirs[0] if xyz_dirs else None
 
-                if not xyz_tables_dir:
-                    print(f"   ⚠️  No xyz_tables directory found for remesh coordinate mapping")
-                    print(f"   💡 Continuing without remesh mapping - some post-remesh data may be unavailable")
-                    should_process_remesh = False  # Skip further remesh processing
-
-        # Only process remesh if we have xyz_tables_dir and need to compute mappings
+        # Process remesh using HDF5 (no CSV files needed)
         if should_process_remesh and not has_existing_mappings and not all_placeholder:
-            # Check if we have multiple remesh events
-            if len(remesh_events_from_hdf5) > 1:
-                # Multiple remesh events - use new multi-remesh function
-                print(f"   Processing {len(remesh_events_from_hdf5)} remesh events from HDF5 metadata")
+            # Build remesh_events list (handles both single and multiple remesh cases)
+            remesh_events = remesh_events_from_hdf5.copy() if remesh_events_from_hdf5 else []
+
+            # For single remesh (legacy format), convert to list format
+            if not remesh_events and remesh_metadata.get('has_remesh'):
+                single_ts = remesh_metadata.get('remesh_timestep_ms', 0)
+                if single_ts > 0:
+                    remesh_events = [{'timestep_ms': single_ts}]
+                    print(f"   Converting single remesh event to list format: {single_ts}ms")
+
+            if remesh_events:
+                print(f"   Processing {len(remesh_events)} remesh event(s) using HDF5 data")
 
                 # Check if post_remesh_list already exists with correct count
                 has_existing_mappings = all(
-                    loc.get('post_remesh_list') and len(loc['post_remesh_list']) == len(remesh_events_from_hdf5)
+                    loc.get('post_remesh_list') and len(loc['post_remesh_list']) == len(remesh_events)
                     for loc in tracking_config.get('locations', [])
                 )
 
                 if has_existing_mappings:
-                    print(f"   ✅ Post-remesh mappings already exist for all {len(remesh_events_from_hdf5)} events")
+                    print(f"   ✅ Post-remesh mappings already exist for all {len(remesh_events)} events")
                 else:
-                    updated_config = update_tracking_locations_for_multiple_remesh(
-                        tracking_config, remesh_events_from_hdf5, xyz_tables_dir
+                    # Use HDF5-based coordinate matching (no CSV files needed)
+                    updated_config = update_tracking_locations_for_remesh_hdf5(
+                        tracking_config, hdf5_file_path, remesh_events
                     )
 
                     # Save updated locations to picked_points.json
@@ -4368,94 +4493,7 @@ def main(overwrite_existing: bool = False,
                     if remesh_mappings:
                         save_post_remesh_mappings(subject_name, remesh_mappings, results_dir)
             else:
-                # Single remesh event - use original function
-                # Determine remesh files: prefer HDF5 metadata, fall back to command line
-                if remesh_metadata.get('has_remesh', False):
-                    remesh_before_file = remesh_metadata.get('remesh_before_file')
-                    remesh_after_file = remesh_metadata.get('remesh_after_file')
-                    print(f"   Using remesh info from HDF5 metadata")
-                else:
-                    remesh_before_file = remesh_before
-                    remesh_after_file = remesh_after
-                    print(f"   Using remesh info from command line")
-
-                if remesh_before_file is None or remesh_after_file is None:
-                    print(f"❌ Remesh requires both before and after CSV filenames")
-                    return
-
-                # Find the actual file paths
-                before_path = None
-                after_path = None
-                for xyz_dir in xyz_dirs:
-                    candidate_before = xyz_dir / remesh_before_file
-                    candidate_after = xyz_dir / remesh_after_file
-                    before_matches = list(xyz_dir.glob(f'*{remesh_before_file}*'))
-                    after_matches = list(xyz_dir.glob(f'*{remesh_after_file}*'))
-
-                    if candidate_before.exists():
-                        before_path = candidate_before
-                    elif before_matches:
-                        before_path = before_matches[0]
-
-                    if candidate_after.exists():
-                        after_path = candidate_after
-                    elif after_matches:
-                        after_path = after_matches[0]
-
-                    if before_path and after_path:
-                        break
-
-                if not before_path or not before_path.exists():
-                    print(f"❌ Before-remesh file not found: {remesh_before_file}")
-                    print(f"   Searched in: {[str(d) for d in xyz_dirs]}")
-                    return
-                if not after_path or not after_path.exists():
-                    print(f"❌ After-remesh file not found: {remesh_after_file}")
-                    print(f"   Searched in: {[str(d) for d in xyz_dirs]}")
-                    return
-
-                print(f"   Before file: {before_path}")
-                print(f"   After file: {after_path}")
-
-                # Check if post_remesh mappings already exist and are valid
-                # Accept either post_remesh (old style) or post_remesh_list (new style)
-                has_existing_mappings = all(
-                    loc.get('post_remesh') is not None or (loc.get('post_remesh_list') and len(loc['post_remesh_list']) > 0)
-                    for loc in tracking_config.get('locations', [])
-                )
-
-                if has_existing_mappings:
-                    print(f"   ✅ Post-remesh mappings already exist in tracking JSON")
-                else:
-                    # Calculate post_remesh mappings (preserves original patch/face)
-                    updated_config = update_tracking_locations_for_remesh(
-                        tracking_config, before_path, after_path
-                    )
-
-                    # Save updated locations to picked_points.json
-                    results_dir = Path(f'{subject_name}_results')
-                    picked_points_path = results_dir / f"{subject_name}_picked_points.json"
-                    if picked_points_path.exists():
-                        with open(picked_points_path, 'r') as f:
-                            picked_points_data = json.load(f)
-                        picked_points_data['locations'] = updated_config.get('locations', [])
-                        with open(picked_points_path, 'w') as f:
-                            json.dump(picked_points_data, f, indent=2)
-                        print(f"✅ Updated picked_points.json with post-remesh mappings")
-
-                    # Also save post_remesh_mappings to metadata.json
-                    remesh_mappings = []
-                    for loc in updated_config.get('locations', []):
-                        post_remesh = loc.get('post_remesh') or (loc.get('post_remesh_list', [None])[0] if loc.get('post_remesh_list') else None)
-                        if post_remesh:
-                            remesh_mappings.append({
-                                'location_id': loc.get('id', loc.get('description', 'unknown')),
-                                'original_patch': loc.get('patch_number'),
-                                'original_face': loc.get('face_indices', [None])[0],
-                                'mappings': [post_remesh]
-                            })
-                    if remesh_mappings:
-                        save_post_remesh_mappings(subject_name, remesh_mappings, results_dir)
+                print(f"   ⚠️  No remesh events found in metadata")
         else:
             print(f"   No remesh detected - using consistent patch/face indices")
 
@@ -4796,6 +4834,14 @@ def main(overwrite_existing: bool = False,
         has_remesh = remesh_metadata.get('has_remesh', False)
         remesh_events = remesh_metadata.get('remesh_events', [])
         remesh_timestep_ms = remesh_metadata.get('remesh_timestep_ms', None)  # Backward compat
+
+        # Check for manual remesh override from metadata.json (priority over auto-detected)
+        if metadata_json and 'remesh_info' in metadata_json:
+            manual_ts = metadata_json['remesh_info'].get('manual_remesh_timesteps_ms', [])
+            if manual_ts and isinstance(manual_ts, list) and len(manual_ts) > 0:
+                print(f"📊 Using manual remesh timesteps from metadata.json: {manual_ts}")
+                remesh_events = [{'timestep_ms': float(ts)} for ts in manual_ts]
+                has_remesh = True
 
         if has_remesh and remesh_events:
             print(f"\n🔄 Remesh detected: {len(remesh_events)} event(s)")
@@ -5552,7 +5598,10 @@ def main(overwrite_existing: bool = False,
                     create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
                     create_cfd_analysis_3x3_panel_with_markers_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
 
-                    print(f"CFD Analysis 3x3 panels completed (shared scale + original data scale).")
+                    # Create CFD analysis 3x3 panels with both normalized and original TIME versions
+                    create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir)
+
+                    print(f"CFD Analysis 3x3 panels completed (shared scale + original data scale + time versions).")
                 else:
                     print(f"Warning: No CFD data found for analysis")
             else:
@@ -5566,8 +5615,9 @@ def main(overwrite_existing: bool = False,
     print(f"- Individual PNG files in {results_dir}/figures/ directory")
     print(f"- Individual CSV files in {results_dir}/tracked_points/ directory")
     
-    # Generate the clean flow profile visualization
-    create_clean_flow_profile_plot(subject_name, figures_dir, pdfs_dir)
+    # Generate flow profile visualizations (both clean and original)
+    create_clean_flow_profile_plot(subject_name, hdf5_file_path, results_dir, figures_dir, pdfs_dir)
+    create_original_flow_profile_plot(subject_name, hdf5_file_path, results_dir, figures_dir, pdfs_dir)
     
     # Generate interactive 3D patch visualization
     if enable_patch_visualization:

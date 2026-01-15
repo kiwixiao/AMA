@@ -25,7 +25,7 @@ import matplotlib.colors as mcolors
 from utils.signal_processing import find_zero_crossings, smart_label_position, format_time_label
 
 
-def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_markers=False, original_data_scale=False):
+def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_markers=False, original_data_scale=False, use_original_time=False):
     """
     Create a single 3x3 page for CFD analysis.
 
@@ -36,6 +36,7 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         pdf: PDF object to save to
         with_markers: Whether to include zero-crossing markers
         original_data_scale: If True, each subplot uses its own data range instead of shared range
+        use_original_time: If True, show original timestamps on X-axis instead of normalized from 0
     """
     # Create figure with 3x3 layout
     fig = plt.figure(figsize=(20, 20))
@@ -59,12 +60,23 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     
     # Create colormap
     normalized_time_max = max([data['normalized_times'].max() for data in data_dict.values()])
+    normalized_time_min = min([data['normalized_times'].min() for data in data_dict.values()])
     global_time_min = min([data['global_time_min'] for data in data_dict.values()])
     original_inhale_exhale = 1.034
-    normalized_inhale_exhale = original_inhale_exhale - global_time_min
-    
-    norm = plt.Normalize(0, normalized_time_max)
-    transition_norm = normalized_inhale_exhale / normalized_time_max
+
+    # Calculate display inhale-exhale transition based on time mode
+    if use_original_time:
+        display_inhale_exhale = original_inhale_exhale  # Keep original timestamp
+    else:
+        display_inhale_exhale = original_inhale_exhale - global_time_min  # Normalized
+
+    # For backward compatibility, also set normalized_inhale_exhale
+    normalized_inhale_exhale = display_inhale_exhale
+
+    norm = plt.Normalize(normalized_time_min, normalized_time_max)
+    # Calculate transition position relative to the full time range
+    time_range = normalized_time_max - normalized_time_min
+    transition_norm = (display_inhale_exhale - normalized_time_min) / time_range if time_range > 0 else 0.5
     
     # Ensure color points are in increasing order
     # Clamp transition points to valid range [0, 1]
@@ -292,12 +304,17 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     # Add overall title
     marker_text = " with Zero-Crossing Markers" if with_markers else ""
     scale_text = " (Original Data Scale)" if original_data_scale else ""
-    fig.suptitle(f'CFD Analysis: {page_title}\nSmoothed, Symmetric Plots{marker_text}{scale_text}', 
+    time_text = " (Original Time)" if use_original_time else ""
+    fig.suptitle(f'CFD Analysis: {page_title}\nSmoothed, Symmetric Plots{marker_text}{scale_text}{time_text}', 
                  fontsize=16, fontweight='bold', y=0.98)
     
     # Add note
     marker_note = " Zero-crossing markers show v=0 (red/green), a=0 (purple), p=0 (blue)." if with_markers else ""
-    fig.text(0.5, 0.01, f'Time normalized to start at 0s. Inhale-exhale transition at {normalized_inhale_exhale:.2f}s.{marker_note}', 
+    if use_original_time:
+        time_note = f'Original timestamps. Inhale-exhale transition at {display_inhale_exhale:.3f}s.'
+    else:
+        time_note = f'Time normalized to start at 0s. Inhale-exhale transition at {display_inhale_exhale:.2f}s.'
+    fig.text(0.5, 0.01, f'{time_note}{marker_note}',
             fontsize=10, ha='center', va='bottom')
     
     # Adjust layout and save
@@ -306,9 +323,15 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
     plt.close()
 
 
-def process_data_for_page(dfs_dict, is_patch=False, radius_key=None):
+def process_data_for_page(dfs_dict, is_patch=False, radius_key=None, use_original_time=False):
     """
     Process data for a single page (either single points or patch data).
+
+    Args:
+        dfs_dict: Dictionary of dataframes
+        is_patch: Whether this is patch data
+        radius_key: Radius key for patch data
+        use_original_time: If True, keep original timestamps; if False, normalize to start from 0
 
     Returns:
         Dictionary with processed data for each location
@@ -362,8 +385,11 @@ def process_data_for_page(dfs_dict, is_patch=False, radius_key=None):
         vdotn = df[vdotn_col].values
         pressure = df[pressure_col].values
         
-        # Normalize time to start from 0
-        normalized_times = times - global_time_min
+        # Normalize time to start from 0, or keep original timestamps
+        if use_original_time:
+            normalized_times = times  # Keep original timestamps
+        else:
+            normalized_times = times - global_time_min
         
         # Apply smoothing - handle small datasets
         data_length = len(times)
@@ -611,6 +637,71 @@ def create_cfd_analysis_3x3_panel_with_markers_original_scale(dfs, patch_dfs, su
                                                with_markers=True, original_data_scale=True)
 
         print(f"Saved to: {pdf_path}")
+
+
+def create_cfd_analysis_3x3_panel_with_markers_both_time_versions(dfs, patch_dfs, subject_name, pdfs_dir):
+    """
+    Create CFD analysis 3x3 panels with markers, generating BOTH normalized and original time versions.
+
+    Outputs:
+        - {subject}_3x3_panel_with_markers_normalized_time.pdf (time starts at 0)
+        - {subject}_3x3_panel_with_markers_original_time.pdf (original timestamps)
+    """
+    if not pdfs_dir:
+        print("Error: pdfs_dir required for generating time version PDFs")
+        return
+
+    # Generate normalized time version (existing behavior - time starts at 0)
+    print(f"\nGenerating CFD Analysis 3x3 Panel (Normalized Time)...")
+    pdf_path_normalized = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_normalized_time.pdf'
+    with PdfPages(pdf_path_normalized) as pdf:
+        if dfs:
+            print("Creating Page: Single Point Data (normalized time)")
+            single_point_data = process_data_for_page(dfs, is_patch=False, use_original_time=False)
+            if single_point_data:
+                create_single_3x3_page(single_point_data, subject_name, "Single Point Data", pdf,
+                                       with_markers=True, original_data_scale=True, use_original_time=False)
+
+        if patch_dfs:
+            all_radii = set()
+            for location_data in patch_dfs.values():
+                all_radii.update(location_data.keys())
+            sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
+
+            for radius_key in sorted_radii:
+                print(f"Creating Page: Patch Mean Data ({radius_key}) normalized time")
+                patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, use_original_time=False)
+                if patch_data:
+                    page_title = f"Patch Mean Data ({radius_key})"
+                    create_single_3x3_page(patch_data, subject_name, page_title, pdf,
+                                           with_markers=True, original_data_scale=True, use_original_time=False)
+    print(f"Saved to: {pdf_path_normalized}")
+
+    # Generate original time version (original timestamps on X-axis)
+    print(f"\nGenerating CFD Analysis 3x3 Panel (Original Time)...")
+    pdf_path_original = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_original_time.pdf'
+    with PdfPages(pdf_path_original) as pdf:
+        if dfs:
+            print("Creating Page: Single Point Data (original time)")
+            single_point_data = process_data_for_page(dfs, is_patch=False, use_original_time=True)
+            if single_point_data:
+                create_single_3x3_page(single_point_data, subject_name, "Single Point Data", pdf,
+                                       with_markers=True, original_data_scale=True, use_original_time=True)
+
+        if patch_dfs:
+            all_radii = set()
+            for location_data in patch_dfs.values():
+                all_radii.update(location_data.keys())
+            sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
+
+            for radius_key in sorted_radii:
+                print(f"Creating Page: Patch Mean Data ({radius_key}) original time")
+                patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, use_original_time=True)
+                if patch_data:
+                    page_title = f"Patch Mean Data ({radius_key})"
+                    create_single_3x3_page(patch_data, subject_name, page_title, pdf,
+                                           with_markers=True, original_data_scale=True, use_original_time=True)
+    print(f"Saved to: {pdf_path_original}")
 
 
 def create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir=None, default_radius="2.0mm"):
