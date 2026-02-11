@@ -19,6 +19,7 @@ dependencies:
   - pyvista>=0.32.0
   - pyvistaqt>=0.9.0
   - vtk>=9.0.0
+  - pyqt>=5.12
 
   # Data processing and I/O
   - h5py>=3.1.0
