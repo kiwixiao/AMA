@@ -4304,10 +4304,10 @@ def main(overwrite_existing: bool = False,
         print(f"   - {subject_name}_cfd_data_light.h5")
         print(f"   - {subject_name}_picked_points.json")
         print(f"\n2. Run point picker locally:")
-        print(f"   python src/main.py --subject {subject_name} --point-picker --light-h5")
+        print(f"   ama --subject {subject_name} --point-picker --light-h5")
         print(f"\n3. Copy {subject_name}_picked_points.json back to cluster")
         print(f"\n4. Run Phase 2 on cluster:")
-        print(f"   python src/main.py --subject {subject_name} --plotting")
+        print(f"   ama --subject {subject_name} --plotting")
 
         print(f"\n🖥️  For DIRECT editing (if interactive HTML works):")
         print(f"1. Open the interactive HTML in your browser:")
@@ -4316,7 +4316,7 @@ def main(overwrite_existing: bool = False,
         print(f"\n3. Edit the picked_points.json file:")
         print(f"   {results_dir}/{subject_name}_picked_points.json")
         print(f"\n4. Run Phase 2:")
-        print(f"   python src/main.py --subject {subject_name} --plotting")
+        print(f"   ama --subject {subject_name} --plotting")
         print("="*60)
 
         if not all_in_one_mode:
@@ -4545,7 +4545,7 @@ def main(overwrite_existing: bool = False,
         if success:
             print(f"✅ Created: {subject_name}_tracking_locations.json")
             print(f"⚠️  IMPORTANT: Update patch numbers using interactive visualization:")
-            print(f"   python src/main.py --raw-surface --subject {subject_name}")
+            print(f"   ama --raw-surface --subject {subject_name}")
         else:
             print(f"❌ Failed to create tracking locations file for {subject_name}")
     
@@ -5696,7 +5696,7 @@ TWO-PHASE WORKFLOW (RECOMMENDED FOR NEW SUBJECTS)
 ═══════════════════════════════════════════════════════════════════════════════
 
 Phase 1: PREPARE - Convert CSV to HDF5, detect breathing cycle/remesh, create templates
-   python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
+   ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
    → Converts raw CSV files to HDF5 format (85% size reduction)
    → Detects breathing cycle from flow profile
@@ -5706,7 +5706,7 @@ Phase 1: PREPARE - Convert CSV to HDF5, detect breathing cycle/remesh, create te
    After Phase 1: Use point picker GUI or interactive HTML to select landmarks.
 
 Phase 2: PLOTTING - Generate all analysis and plots
-   python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+   ama --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
    → Uses existing HDF5 file (skips CSV processing)
    → Loads tracking locations from results folder
@@ -5718,73 +5718,73 @@ Phase 2: PLOTTING - Generate all analysis and plots
 DEMO USAGE SCENARIOS:
 
 1. 🚀 COMPLETE ANALYSIS IN ONE PASS (requires pre-configured tracking):
-   python src/main.py --subject OSAMRI007 --all --flow-profile OSAMRI007FlowProfile_smoothed.csv
+   ama --subject OSAMRI007 --all --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
    → Runs prepare + tracking + plotting in one pass
    → Outputs: HDF5, CSV data, PDF reports, PNG figures, HTML visualizations
    → Time: ~5-10 minutes for full analysis
 
 2. 🔄 FORCE COMPLETE RERUN (overwrite existing data):
-   python src/main.py --subject OSAMRI007 --forcererun
+   ama --subject OSAMRI007 --forcererun
 
    → Reprocesses everything even if files exist
    → Use when you want fresh analysis or changed parameters
 
 3. 🎨 HIGHLIGHT PATCH REGIONS:
-   python src/main.py --subject OSAMRI007 --highlight-patches --patch-timestep 100
+   ama --subject OSAMRI007 --highlight-patches --patch-timestep 100
    
    → Quick visualization of patch regions around tracking points (100 = 0.1s)
    → Shows 1mm, 2mm, 5mm patches around anatomical landmarks
    → Time: ~30 seconds
 
 4. 🌊 RAW SURFACE VISUALIZATION:
-   python src/main.py --subject OSAMRI007 --raw-surface --surface-timestep 50
+   ama --subject OSAMRI007 --raw-surface --surface-timestep 50
    
    → Shows complete raw airway surface for manual point selection
    → Use for selecting new tracking locations interactively
    → Time: ~1 minute
 
 5. 🎯 INTERACTIVE POINT SELECTOR:
-   python src/main.py --subject OSAMRI007 --interactive-selector --selector-timestep 100
+   ama --subject OSAMRI007 --interactive-selector --selector-timestep 100
    
    → Launch 3D point picker for selecting new tracking locations
    → Click points to add to tracking locations JSON
    → Requires PyVista
 
 6. 📊 CUSTOM PATCH ANALYSIS:
-   python src/main.py --subject OSAMRI007 --patchradii 1.0 3.0 7.0 --normalangle 45.0
+   ama --subject OSAMRI007 --patchradii 1.0 3.0 7.0 --normalangle 45.0
    
    → Custom patch sizes (1mm, 3mm, 7mm) and surface filtering (45°)
    → Analyzes different region sizes around tracking points
 
 7. 🔍 LIST AVAILABLE SUBJECTS:
-   python src/main.py --listsubjects
+   ama --listsubjects
    
    → Shows all detected subjects and their status
    → Checks for required flow profile files
 
 8. ⚡ ANALYSIS WITHOUT VISUALIZATION:
-   python src/main.py --subject OSAMRI007 --disablevisualization
+   ama --subject OSAMRI007 --disablevisualization
    
    → Faster processing, generates all PDFs but no interactive HTML
    → Good for batch processing or when visualization not needed
 
 9. 📈 SINGLE POINT ANALYSIS ONLY:
-   python src/main.py --subject OSAMRI007 --disablepatchanalysis
+   ama --subject OSAMRI007 --disablepatchanalysis
    
    → Analyzes only individual tracking points (no patch regions)
    → Faster processing, smaller output files
 
-REQUIRED FILES:
-- {SUBJECT}FlowProfile.csv (breathing flow data)
-- {SUBJECT}FlowProfile_smoothed.csv (smoothed flow data)  
-- {SUBJECT}_xyz_tables/ (CFD geometry data)
-- {SUBJECT}_tracking_locations.json (anatomical landmark definitions)
+REQUIRED INPUT:
+- {SUBJECT}_xyz_tables/              (CFD geometry CSV files)
+- {SUBJECT}FlowProfile_smoothed.csv  (breathing flow data, optional for Phase 1)
 
 OUTPUTS STRUCTURE:
 {SUBJECT}_results/                              (self-contained results folder)
-├── {SUBJECT}_cfd_data.h5                       (HDF5 cache - 85% size reduction)
-├── {SUBJECT}_tracking_locations.json           (editable tracking locations)
+├── {SUBJECT}_cfd_data.h5                       (HDF5 cache - all timesteps)
+├── {SUBJECT}_cfd_data_light.h5                 (Light HDF5 - single timestep, portable)
+├── {SUBJECT}_picked_points.json                (tracking locations - EDIT THIS)
+├── {SUBJECT}_metadata.json                     (system metadata)
 ├── {SUBJECT}_key_time_points.json              (breathing cycle analysis)
 ├── tracked_points/                             (CSV trajectory data)
 ├── figures/                                    (PNG images)
@@ -5792,7 +5792,7 @@ OUTPUTS STRUCTURE:
 └── interactive/                                (HTML visualizations)
 
 ENVIRONMENT:
-Setup: conda env create -f environment.yml && conda activate cfd-analysis
+Setup: bash setup.sh   (or: conda env create -f environment.yml && conda activate ama && pip install .)
 '''
 
     parser = argparse.ArgumentParser(
@@ -5801,37 +5801,37 @@ Setup: conda env create -f environment.yml && conda activate cfd-analysis
         epilog='''
 Examples (Two-Phase Workflow - Recommended):
   # Phase 1: Create HDF5 and interactive HTML for point selection
-  python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
+  ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
   # Phase 1 with manual breathing cycle times (skips auto-detection prompt)
-  python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
+  ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
 
   # Phase 2: Generate all analysis and plots (after updating tracking JSON)
-  python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+  ama --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
 Examples (Point Picker - For selecting anatomical landmarks):
   # Launch point picker with lightweight H5 (fast, portable)
-  python src/main.py --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data_light.h5
+  ama --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data_light.h5
 
   # Launch point picker with full H5
-  python src/main.py --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
+  ama --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
 
 Examples (Custom XYZ Path - Data stored elsewhere):
   # Phase 1 with custom XYZ path (results still saved to ./OSAMRI007_results/)
-  python src/main.py --subject OSAMRI007 --prepare \\
+  ama --subject OSAMRI007 --prepare \\
       --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
       --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
 
   # Phase 2 with custom XYZ path
-  python src/main.py --subject OSAMRI007 --plotting \\
+  ama --subject OSAMRI007 --plotting \\
       --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
       --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
 
 Examples (Other Commands):
-  python src/main.py --subject OSAMRI007                    # Full analysis (legacy)
-  python src/main.py --subject OSAMRI007 --forcererun      # Force complete rerun
-  python src/main.py --highlight-patches --patch-timestep 100  # Highlight patch regions
-  python src/main.py --listsubjects                         # Show available data
+  ama --subject OSAMRI007                    # Full analysis (legacy)
+  ama --subject OSAMRI007 --forcererun      # Force complete rerun
+  ama --highlight-patches --patch-timestep 100  # Highlight patch regions
+  ama --listsubjects                         # Show available data
         '''
     )
     
@@ -5950,7 +5950,7 @@ Examples (Other Commands):
                 print(f"✅ Flow profile will be extracted from HDF5")
             else:
                 print("❌ ERROR: --flow-profile is required (not found in HDF5)")
-                print("   Example: python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile.csv")
+                print("   Example: ama --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile.csv")
                 sys.exit(1)
 
     # Handle list subjects command
