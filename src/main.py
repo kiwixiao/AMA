@@ -3715,14 +3715,10 @@ def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str
             print(f"⚠️  Warning: Could not read HDF5 metadata: {e}")
 
     # Priority 2: Fall back to CSV files + flow profile detection
-    # Check for patched XYZ files first
-    xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
+    xyz_dir = Path(f'{subject_name}_xyz_tables')
     if not xyz_dir.exists():
-        # Fall back to raw files
-        xyz_dir = Path(f'{subject_name}_xyz_tables')
-        if not xyz_dir.exists():
-            print("⚠️  Warning: No XYZ directory found, using default 100ms")
-            return 100.0, 100
+        print("⚠️  Warning: No XYZ directory found, using default 100ms")
+        return 100.0, 100
 
     # Get available timesteps
     available_files = list(xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
@@ -4082,18 +4078,12 @@ def main(overwrite_existing: bool = False,
             print(f"📁 Using custom XYZ path: {xyz_path}")
         elif raw_dir:
             raw_xyz_dir = Path(raw_dir)
-            if not raw_xyz_dir.exists():
-                # Try patched directory
-                raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
         else:
             raw_xyz_dir = Path(f'{subject_name}_xyz_tables')
-            if not raw_xyz_dir.exists():
-                # Try patched directory
-                raw_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
 
         if not raw_xyz_dir.exists():
             print(f"❌ No XYZ directory found for {subject_name}")
-            print(f"   Expected: {subject_name}_xyz_tables or {subject_name}_xyz_tables_with_patches")
+            print(f"   Expected: {subject_name}_xyz_tables/")
             if xyz_path:
                 print(f"   Or custom path: {xyz_path}")
             return
@@ -4665,56 +4655,40 @@ def main(overwrite_existing: bool = False,
         
         else:
             # Original CSV processing path
-            # Try to get patched XYZ table files first
-            xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
-            xyz_files = list(xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
-            
-            # If no patched files found, look for raw files and process them
-            if not xyz_files:
-                print(f"No patched XYZ table files found in {xyz_dir}")
-                print("Looking for raw XYZ table files...")
-
-                # Determine raw directory name
-                # Priority: xyz_path > raw_dir > default ({subject}_xyz_tables)
-                if xyz_path is not None:
-                    raw_xyz_dir = Path(xyz_path)
-                    print(f"📁 Using custom XYZ path: {xyz_path}")
-                elif raw_dir is not None:
-                    raw_xyz_dir = Path(raw_dir)
-                    print(f"Using custom raw directory: {raw_dir}")
-                else:
-                    raw_xyz_dir = Path(f'{subject_name}_xyz_tables')
-                    print(f"Using default raw directory: {raw_xyz_dir}")
-                
-                raw_xyz_files = list(raw_xyz_dir.glob('XYZ_Internal_Table_table_*.csv'))
-                
-                if raw_xyz_files:
-                    print(f"Found {len(raw_xyz_files)} raw XYZ files")
-                    print(f"⚠️  SKIPPING patched CSV creation (saving disk space - using HDF5 instead)")
-                    # Sort raw files using natural chronological order based on timestep values
-                    timestep_file_pairs = []
-                    for file_path in raw_xyz_files:
-                        try:
-                            timestep = extract_timestep_from_filename(file_path)
-                            timestep_file_pairs.append((timestep, file_path))
-                        except ValueError:
-                            print(f"Warning: Could not parse timestep from {file_path.name}")
-                            continue
-                    
-                    # Sort by timestep value (natural chronological order)
-                    timestep_file_pairs.sort(key=lambda x: x[0])
-                    xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
-                    
-                    # Use raw files directly for HDF5 conversion (skip patched CSV creation)
-                    print(f"✅ Using {len(xyz_files)} raw files directly for HDF5 conversion")
-                else:
-                    if raw_dir is not None:
-                        print(f"No XYZ table files found in custom directory {raw_dir} or patched directory {xyz_dir}")
-                    else:
-                        print(f"No XYZ table files found in either {xyz_dir} or {raw_xyz_dir}")
-                    return
+            # Determine raw directory name
+            # Priority: xyz_path > raw_dir > default ({subject}_xyz_tables)
+            if xyz_path is not None:
+                raw_xyz_dir = Path(xyz_path)
+                print(f"📁 Using custom XYZ path: {xyz_path}")
+            elif raw_dir is not None:
+                raw_xyz_dir = Path(raw_dir)
+                print(f"Using custom raw directory: {raw_dir}")
             else:
-                print(f"Found {len(xyz_files)} existing patched XYZ table files")
+                raw_xyz_dir = Path(f'{subject_name}_xyz_tables')
+                print(f"Using default raw directory: {raw_xyz_dir}")
+
+            raw_xyz_files = list(raw_xyz_dir.glob('XYZ_Internal_Table_table_*.csv'))
+
+            if raw_xyz_files:
+                print(f"Found {len(raw_xyz_files)} raw XYZ files")
+                # Sort raw files using natural chronological order based on timestep values
+                timestep_file_pairs = []
+                for file_path in raw_xyz_files:
+                    try:
+                        timestep = extract_timestep_from_filename(file_path)
+                        timestep_file_pairs.append((timestep, file_path))
+                    except ValueError:
+                        print(f"Warning: Could not parse timestep from {file_path.name}")
+                        continue
+
+                # Sort by timestep value (natural chronological order)
+                timestep_file_pairs.sort(key=lambda x: x[0])
+                xyz_files = [file_path for timestep, file_path in timestep_file_pairs]
+
+                print(f"✅ Using {len(xyz_files)} raw files for HDF5 conversion")
+            else:
+                print(f"No XYZ table files found in {raw_xyz_dir}")
+                return
             
             # Sort using natural chronological order based on timestep values
             timestep_file_pairs = []
@@ -5804,7 +5778,7 @@ DEMO USAGE SCENARIOS:
 REQUIRED FILES:
 - {SUBJECT}FlowProfile.csv (breathing flow data)
 - {SUBJECT}FlowProfile_smoothed.csv (smoothed flow data)  
-- {SUBJECT}_xyz_tables/ or {SUBJECT}_xyz_tables_with_patches/ (CFD geometry data)
+- {SUBJECT}_xyz_tables/ (CFD geometry data)
 - {SUBJECT}_tracking_locations.json (anatomical landmark definitions)
 
 OUTPUTS STRUCTURE:
@@ -5929,6 +5903,25 @@ Examples (Other Commands):
                       help='Specific timestep for point picker (optional, will prompt if not provided)')
 
     args = parser.parse_args()
+
+    # Validate subject's xyz_tables directory exists (early check before any processing)
+    if args.subject and not args.listsubjects:
+        xyz_path_arg = getattr(args, 'xyz_path', None)
+        rawdir_arg = getattr(args, 'rawdir', None)
+        if not xyz_path_arg and not rawdir_arg:
+            xyz_dir = Path(f'{args.subject}_xyz_tables')
+            if not xyz_dir.exists():
+                print(f"❌ ERROR: No input data folder found for subject '{args.subject}'")
+                print(f"   Expected: {xyz_dir}/")
+                print(f"   Available subjects:")
+                available = list(Path('.').glob('*_xyz_tables'))
+                if available:
+                    for d in sorted(available):
+                        name = d.name.replace('_xyz_tables', '')
+                        print(f"     • {name}")
+                else:
+                    print(f"     (none found in current directory)")
+                sys.exit(1)
 
     # Validate --flow-profile for production modes (now optional for Phase 1)
     if getattr(args, 'prepare', False) or getattr(args, 'all', False):
