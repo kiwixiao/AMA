@@ -3806,7 +3806,10 @@ def main(overwrite_existing: bool = False,
          has_remesh: bool = False,
          remesh_before: str = None,
          remesh_after: str = None,
-         flow_profile_path: str = None):
+         flow_profile_path: str = None,
+         inhale_start: float = None,
+         transition: float = None,
+         exhale_end: float = None):
     """
     Main function to process CFD data and generate analysis plots.
 
@@ -4161,25 +4164,19 @@ def main(overwrite_existing: bool = False,
         # Enhanced breathing cycle detection (supports 4 modes: A, B, C, M)
         print(f"\n🫁 Detecting breathing cycle...")
 
-        # Check for CLI manual override arguments
+        # Check for manual override arguments
         manual_times = None
-        if hasattr(args, 'inhale_start') or hasattr(args, 'transition') or hasattr(args, 'exhale_end'):
-            inhale_start = getattr(args, 'inhale_start', None)
-            transition = getattr(args, 'transition', None)
-            exhale_end = getattr(args, 'exhale_end', None)
-
-            if inhale_start is not None or transition is not None or exhale_end is not None:
-                manual_times = {
-                    'start_s': inhale_start,
-                    'transition_s': transition,
-                    'end_s': exhale_end
-                }
-                # Check if all 3 are provided
-                if all(v is not None for v in [inhale_start, transition, exhale_end]):
-                    print(f"📝 Using CLI manual override for breathing cycle times")
-                else:
-                    print(f"⚠ Partial CLI times provided - will prompt for missing values")
-                    manual_times = None  # Fall back to interactive if incomplete
+        if inhale_start is not None or transition is not None or exhale_end is not None:
+            manual_times = {
+                'start_s': inhale_start,
+                'transition_s': transition,
+                'end_s': exhale_end
+            }
+            if all(v is not None for v in [inhale_start, transition, exhale_end]):
+                print(f"📝 Using manual override for breathing cycle times")
+            else:
+                print(f"⚠ Partial times provided - will prompt for missing values")
+                manual_times = None
 
         breathing_cycle = detect_breathing_cycle_enhanced(
             flow_profile_path=flow_profile_path,
@@ -6055,7 +6052,10 @@ Examples (Other Commands):
          has_remesh=getattr(args, 'has_remesh', False),
          remesh_before=getattr(args, 'remesh_before', None),
          remesh_after=getattr(args, 'remesh_after', None),
-         flow_profile_path=getattr(args, 'flow_profile', None))
+         flow_profile_path=getattr(args, 'flow_profile', None),
+         inhale_start=getattr(args, 'inhale_start', None),
+         transition=getattr(args, 'transition', None),
+         exhale_end=getattr(args, 'exhale_end', None))
 
 
 if __name__ == '__main__':
