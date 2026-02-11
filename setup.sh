@@ -1,137 +1,102 @@
 #!/bin/bash
 
-# CFD Analysis Pipeline Setup Script
-# This script automates the installation of the CFD analysis environment
+# AMA (Airway Metrics Analysis) Setup Script
+# Handles both conda and pip environments automatically
 
-set -e  # Exit on any error
+set -e
 
-echo "🚀 CFD Analysis Pipeline Setup"
-echo "=============================="
-
-# Check if conda is available
-if command -v conda &> /dev/null; then
-    echo "✅ Conda found"
-    USE_CONDA=true
-else
-    echo "⚠️  Conda not found, using pip instead"
-    USE_CONDA=false
-fi
-
-# Setup with conda (recommended)
-if [ "$USE_CONDA" = true ]; then
-    echo "📦 Setting up conda environment..."
-    
-    # Check if environment already exists
-    if conda env list | grep -q "^cfd-analysis "; then
-        echo "✅ Environment 'cfd-analysis' already exists - skipping creation"
-        echo ""
-        echo "   To update dependencies, run:"
-        echo "   conda env update -f environment.yml --prune"
-        echo ""
-    else
-        # Create environment
-        echo "🔧 Creating conda environment..."
-        conda env create -f environment.yml
-        echo "✅ Conda environment created successfully!"
-    fi
-    echo ""
-    echo "To activate the environment, run:"
-    echo "  conda activate cfd-analysis"
-    
-else
-    # Setup with pip
-    echo "📦 Setting up pip environment..."
-    
-    # Check if we're in a virtual environment
-    if [[ -z "${VIRTUAL_ENV}" ]]; then
-        echo "⚠️  No virtual environment detected"
-        read -p "Do you want to create a virtual environment? (y/n): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            python -m venv cfd-env
-            source cfd-env/bin/activate
-            echo "✅ Virtual environment created and activated"
-        else
-            echo "⚠️  Installing packages globally (not recommended)"
-        fi
-    fi
-    
-    # Install packages
-    echo "🔧 Installing Python packages..."
-    pip install -r requirements.txt
-    
-    echo "✅ Pip packages installed successfully!"
-    echo ""
-    if [[ -n "${VIRTUAL_ENV}" ]]; then
-        echo "Virtual environment is active. To reactivate later, run:"
-        echo "  source cfd-env/bin/activate"
-    fi
-fi
-
-# Test installation
+echo "AMA Setup"
+echo "========="
 echo ""
-echo "🧪 Testing installation..."
 
-# Activate environment for testing
-if [ "$USE_CONDA" = true ]; then
-    eval "$(conda shell.bash hook)"
-    conda activate cfd-analysis
+# Detect environment manager
+USE_CONDA=false
+if command -v conda &> /dev/null; then
+    USE_CONDA=true
 fi
 
-# Test core imports
+# --- Conda path ---
+if [ "$USE_CONDA" = true ]; then
+    echo "Conda detected."
+
+    ENV_NAME="ama"
+
+    if conda env list | grep -q "^${ENV_NAME} "; then
+        echo "Environment '${ENV_NAME}' already exists."
+        echo "Updating..."
+        conda env update -n "${ENV_NAME}" -f environment.yml --prune
+    else
+        echo "Creating conda environment '${ENV_NAME}'..."
+        conda env create -f environment.yml
+    fi
+
+    # Activate and install ama as editable package
+    eval "$(conda shell.bash hook)"
+    conda activate "${ENV_NAME}"
+    pip install -e .
+
+    echo ""
+    echo "Done. To use:"
+    echo "  conda activate ${ENV_NAME}"
+    echo "  ama --listsubjects"
+
+# --- Pip path ---
+else
+    echo "Conda not found, using pip."
+
+    VENV_DIR=".venv"
+
+    if [ ! -d "${VENV_DIR}" ]; then
+        echo "Creating virtual environment in ${VENV_DIR}..."
+        python -m venv "${VENV_DIR}"
+    fi
+
+    source "${VENV_DIR}/bin/activate"
+    pip install -e .
+
+    echo ""
+    echo "Done. To use:"
+    echo "  source ${VENV_DIR}/bin/activate"
+    echo "  ama --listsubjects"
+fi
+
+# --- Verify ---
+echo ""
+echo "Verifying installation..."
+
 python -c "
 import sys
-modules = [
-    ('numpy', 'NumPy'),
-    ('pandas', 'Pandas'),
-    ('scipy', 'SciPy'),
-    ('matplotlib', 'Matplotlib'),
-    ('plotly', 'Plotly'),
-    ('h5py', 'HDF5'),
-    ('sklearn', 'scikit-learn'),
-    ('pyvista', 'PyVista'),
-    ('pyvistaqt', 'PyVistaQt'),
-]
-all_ok = True
-for module, name in modules:
+required = ['numpy', 'pandas', 'scipy', 'matplotlib', 'plotly', 'h5py', 'sklearn']
+optional = ['pyvista', 'pyvistaqt']
+ok = True
+for m in required:
     try:
-        __import__(module)
-        print(f'  ✓ {name}')
+        __import__(m)
+        print(f'  OK  {m}')
     except ImportError:
-        print(f'  ✗ {name}')
-        all_ok = False
-sys.exit(0 if all_ok else 1)
+        print(f'  FAIL {m}')
+        ok = False
+for m in optional:
+    try:
+        __import__(m)
+        print(f'  OK  {m}')
+    except ImportError:
+        print(f'  SKIP {m} (optional, needed for --point-picker GUI)')
+if not ok:
+    print('Some required packages failed to import.')
+    sys.exit(1)
 "
 
-if [ $? -eq 0 ]; then
-    echo "✅ All core dependencies installed!"
+if ama --listsubjects > /dev/null 2>&1; then
+    echo "  OK  ama command"
 else
-    echo "⚠️  Some dependencies failed to import"
-fi
-
-# Test pipeline
-if python src/main.py --listsubjects &> /dev/null; then
-    echo "✅ Pipeline test passed!"
-else
-    echo "⚠️  Pipeline test failed - check error messages above"
+    echo "  WARN ama --listsubjects returned non-zero (may need data files)"
 fi
 
 echo ""
-echo "🎉 Setup complete!"
+echo "Setup complete."
 echo ""
-echo "Next steps:"
-echo "1. Activate the environment:"
-if [ "$USE_CONDA" = true ]; then
-    echo "   conda activate cfd-analysis"
-else
-    echo "   source cfd-env/bin/activate  # if using virtual environment"
-fi
-echo ""
-echo "2. Test with your data:"
-echo "   python src/main.py --listsubjects"
-echo "   python src/main.py --subject YOUR_SUBJECT_NAME"
-echo ""
-echo "3. For custom raw data directory:"
-echo "   python src/main.py --subject YOUR_SUBJECT_NAME --rawdir YOUR_RAW_DIR"
-echo ""
-echo "📖 See README.md for detailed usage instructions" 
+echo "3-Phase Workflow:"
+echo "  Phase 1: ama --subject SUBJ --prepare --flow-profile FLOWProfile.csv"
+echo "  Phase 2: ama --subject SUBJ --point-picker"
+echo "  Phase 3: ama --subject SUBJ --plotting"

@@ -1,9 +1,8 @@
-name: cfd-analysis
+name: ama
 channels:
   - conda-forge
   - defaults
 dependencies:
-  # Python version (pinned to stable release - 3.14 breaks pyvista)
   - python>=3.9,<3.13
 
   # Core scientific computing
@@ -16,7 +15,7 @@ dependencies:
   - plotly>=5.3.0
   - seaborn>=0.11.0
 
-  # 3D visualization
+  # 3D visualization (for point picker GUI)
   - pyvista>=0.32.0
   - pyvistaqt>=0.9.0
   - vtk>=9.0.0
@@ -32,9 +31,4 @@ dependencies:
   # System monitoring
   - psutil>=5.8.0
 
-  # Web dashboard (for interactive visualization)
-  - dash>=2.0.0
-  - dash-bootstrap-components>=1.0.0
-
-  # pip for additional packages
   - pip
