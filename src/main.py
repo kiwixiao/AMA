@@ -6008,9 +6008,15 @@ Examples (Other Commands):
                 print(f"❌ ERROR: Specified HDF5 file not found: {h5_file}")
                 sys.exit(1)
         else:
-            h5_file = results_dir / f"{args.subject}_cfd_data.h5"
-            if not h5_file.exists():
-                print(f"❌ ERROR: HDF5 cache not found: {h5_file}")
+            # Prefer light H5 (single timestep, ~37MB) over full H5 (~8GB)
+            h5_light = results_dir / f"{args.subject}_cfd_data_light.h5"
+            h5_full = results_dir / f"{args.subject}_cfd_data.h5"
+            if h5_light.exists():
+                h5_file = h5_light
+            elif h5_full.exists():
+                h5_file = h5_full
+            else:
+                print(f"❌ ERROR: No HDF5 cache found in {results_dir}")
                 print("   Run --prepare first to create HDF5 cache")
                 sys.exit(1)
 
