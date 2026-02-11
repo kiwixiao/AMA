@@ -66,5 +66,8 @@ ENV/
 # Lock files
 uv.lock
 
+# Claude Code
+CLAUDE.md
+
 # Autonomous agent state
 .autonomous/
