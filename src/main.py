@@ -5667,7 +5667,7 @@ def main(overwrite_existing: bool = False,
     print("\n✅ Analysis pipeline completed successfully!")
 
 def cli_main():
-    """Entry point for the CLI tool (used by both `python src/main.py` and `ama` command)."""
+    """Entry point for the CLI tool (`ama` command)."""
     # Create custom help formatter for better formatting
     class CustomHelpFormatter(argparse.RawDescriptionHelpFormatter):
         def _format_action_invocation(self, action):

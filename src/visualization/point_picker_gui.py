@@ -6,7 +6,7 @@ A proper GUI application with:
 - Right panel: 3D PyVista view for point selection
 
 Usage:
-    python src/main.py --point-picker --subject SUBJECT_NAME
+    ama --point-picker --subject SUBJECT_NAME
 """
 
 import numpy as np
@@ -523,7 +523,7 @@ class PointPickerGUI(QMainWindow):
             f"Saved {len(self.picked_points)} points ({named} named)\n\n"
             f"File: {self.tracking_json_path}\n\n"
             f"Ready for Phase 2:\n"
-            f"python src/main.py --subject {self.subject_name} --plotting"
+            f"ama --subject {self.subject_name} --plotting"
         )
 
         self.close()

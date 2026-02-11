@@ -47,7 +47,7 @@ class InteractivePointSelector:
         print(f"🎯 Loading data for {self.subject_name} at timestep {self.timestep}")
         
         # Load the XYZ data
-        csv_file = f"{self.subject_name}_xyz_tables_with_patches/patched_XYZ_Internal_Table_table_{self.timestep}.csv"
+        csv_file = f"{self.subject_name}_xyz_tables/XYZ_Internal_Table_table_{self.timestep}.csv"
         
         if not Path(csv_file).exists():
             raise FileNotFoundError(f"Data file not found: {csv_file}")
@@ -248,7 +248,7 @@ class InteractivePointSelector:
             return
             
         # Load existing tracking locations
-        tracking_file = f"{self.subject_name}_tracking_locations.json"
+        tracking_file = f"{self.subject_name}_results/{self.subject_name}_picked_points.json"
         
         if Path(tracking_file).exists():
             with open(tracking_file, 'r') as f:

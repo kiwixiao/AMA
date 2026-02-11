@@ -188,7 +188,7 @@ Two formats supported:
 
 ## Development Notes
 
-- `src/main.py` imports are set up for both direct execution (`python src/main.py`) and module execution, via `sys.path` manipulation at the top
+- `src/main.py` is the entry point, invoked via the `ama` CLI command (installed via `pip install .`)
 - Optional imports (`SURFACE_PLOTS_AVAILABLE`, `VISUALIZATION_AVAILABLE`, `CFD_ANALYSIS_AVAILABLE`) use try/except with fallback stubs so the pipeline degrades gracefully
 - All coordinates are in meters (column names: `X (m)`, `Y (m)`, `Z (m)`)
 - Area vectors use columns: `Area[i] (m^2)`, `Area[j] (m^2)`, `Area[k] (m^2)`

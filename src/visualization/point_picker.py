@@ -6,10 +6,7 @@ Unlike Plotly's web-based visualization, PyVista uses native VTK picking which
 handles millions of points efficiently.
 
 Usage:
-    python src/main.py --point-picker --subject SUBJECT_NAME
-
-Or standalone:
-    python -m src.visualization.point_picker --subject SUBJECT_NAME
+    ama --point-picker --subject SUBJECT_NAME
 """
 
 import numpy as np
@@ -650,7 +647,7 @@ class PointPicker:
 
             self.save_tracking_locations()
             print(f"\n✅ Ready for Phase 2! Run:")
-            print(f"   python src/main.py --subject {self.subject_name} --plotting")
+            print(f"   ama --subject {self.subject_name} --plotting")
         else:
             print("\n⚠️  No points were selected. Nothing saved.")
 

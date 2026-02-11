@@ -322,7 +322,7 @@ def plot_3d_interactive_all_patches(data_source, tracking_points, subject_name: 
                 </div>
                 <div style="color: #27ae60; font-size: 11px; font-style: italic;">
                     Use PyVista picker for fast point selection:<br>
-                    python src/main.py --point-picker
+                    ama --point-picker
                 </div>
             </div>
         `;

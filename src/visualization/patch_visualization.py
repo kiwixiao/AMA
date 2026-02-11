@@ -74,11 +74,11 @@ def visualize_patch_regions(subject_name: str,
     if df is None:
         print(f"📊 Loading from CSV files...")
         # Load base airway surface
-        patched_xyz_dir = Path(f'{subject_name}_xyz_tables_with_patches')
-        
+        patched_xyz_dir = Path(f'{subject_name}_xyz_tables')
+
         # Find the file that matches the timestep (handle scientific notation)
         base_file = None
-        available_files = list(patched_xyz_dir.glob('patched_XYZ_Internal_Table_table_*.csv'))
+        available_files = list(patched_xyz_dir.glob('*XYZ_Internal_Table_table_*.csv'))
         
         # Import timestep extraction function
         try:

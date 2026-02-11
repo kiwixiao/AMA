@@ -424,7 +424,7 @@ def create_interactive_selector(subject_name: str,
 if __name__ == "__main__":
     # Example usage
     subject_name = "OSAMRI007"
-    csv_file = Path(f"{subject_name}_xyz_tables_with_patches/patched_XYZ_Internal_Table_table_100.csv")
+    csv_file = Path(f"{subject_name}_xyz_tables/XYZ_Internal_Table_table_100.csv")
     
     selector = create_interactive_selector(subject_name, csv_file)
     selector.run_app() 

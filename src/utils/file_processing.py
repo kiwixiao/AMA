@@ -208,11 +208,7 @@ def validate_subject_files(subject_name: str, required_files: List[str] = None) 
     
     # Check XYZ tables directory
     if "xyz_tables" in required_files:
-        xyz_dirs = [
-            f"{subject_name}_xyz_tables",
-            f"{subject_name}_xyz_tables_with_patches"
-        ]
-        found_xyz = any(Path(d).exists() and Path(d).is_dir() for d in xyz_dirs)
+        found_xyz = Path(f"{subject_name}_xyz_tables").exists() and Path(f"{subject_name}_xyz_tables").is_dir()
         results["xyz_tables"] = found_xyz
         if not found_xyz:
             print(f"❌ Missing XYZ tables directory")
@@ -266,7 +262,7 @@ def load_tracking_locations(subject_name: str = None, config_file: str = None) -
             if base_subject != subject_name and not file_to_use.startswith(subject_name):
                 print(f"⚠️  WARNING: Using inherited tracking locations from {base_subject}")
                 print(f"⚠️  Patch numbers may be incorrect for mesh variant {subject_name}")
-                print(f"⚠️  Consider updating: python src/main.py --raw-surface --subject {subject_name}")
+                print(f"⚠️  Consider updating: ama --raw-surface --subject {subject_name}")
     else:
         # Default to generic file
         file_to_use = "tracking_locations.json"
@@ -2234,18 +2230,9 @@ def get_xyz_file_info(subject_name: str) -> Dict:
         Dictionary with file analysis information
     """
     # Find XYZ tables directory
-    xyz_dirs = [
-        f"{subject_name}_xyz_tables_with_patches",
-        f"{subject_name}_xyz_tables"
-    ]
-    
-    xyz_dir = None
-    for dir_name in xyz_dirs:
-        if Path(dir_name).exists():
-            xyz_dir = Path(dir_name)
-            break
-    
-    if xyz_dir is None:
+    xyz_dir = Path(f"{subject_name}_xyz_tables")
+
+    if not xyz_dir.exists():
         return {
             'directory': None,
             'files_found': 0,
@@ -2410,18 +2397,9 @@ def get_xyz_files_in_chronological_order(subject_name: str) -> List[Path]:
         List of Path objects sorted by actual timestep value
     """
     # Find XYZ tables directory
-    xyz_dirs = [
-        f"{subject_name}_xyz_tables_with_patches",
-        f"{subject_name}_xyz_tables"
-    ]
-    
-    xyz_dir = None
-    for dir_name in xyz_dirs:
-        if Path(dir_name).exists():
-            xyz_dir = Path(dir_name)
-            break
-    
-    if xyz_dir is None:
+    xyz_dir = Path(f"{subject_name}_xyz_tables")
+
+    if not xyz_dir.exists():
         return []
     
     # Get all CSV files
@@ -2615,10 +2593,10 @@ def create_picked_points_template(subject_name: str, output_dir: Path,
         ],
         "_instructions": {
             "step1": "Copy this file and the lightweight HDF5 to your local machine",
-            "step2": "Run: python src/main.py --subject {subject} --point-picker --light-h5",
+            "step2": "Run: ama --subject {subject} --point-picker",
             "step3": "Pick points interactively using the GUI",
             "step4": "Copy this file back to the cluster results folder",
-            "step5": "Run Phase 2: python src/main.py --subject {subject} --plotting"
+            "step5": "Run Phase 2: ama --subject {subject} --plotting"
         }
     }
 

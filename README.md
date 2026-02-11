@@ -67,10 +67,10 @@ Pick anatomical landmarks using the PyVista GUI or interactive HTML.
 ama --subject OSAMRI007 --point-picker
 
 # Option B: Open the interactive HTML from Phase 1 in your browser
-# Then manually edit OSAMRI007_results/OSAMRI007_tracking_locations.json
+# Then manually edit OSAMRI007_results/OSAMRI007_picked_points.json
 ```
 
-Update `{SUBJECT}_results/{SUBJECT}_tracking_locations.json` with correct patch numbers, face indices, and coordinates for each landmark.
+Update `{SUBJECT}_results/{SUBJECT}_picked_points.json` with correct patch numbers, face indices, and coordinates for each landmark.
 
 ### Phase 3: Analyze
 
@@ -97,16 +97,17 @@ ama --subject OSAMRI007 --all --flow-profile OSAMRI007FlowProfile_smoothed.csv
 ```
 working_directory/
 ├── {SUBJECT}_xyz_tables/              # Raw CFD CSV files
-├── {SUBJECT}FlowProfile_smoothed.csv  # Breathing flow data
-└── {SUBJECT}_tracking_locations.json  # (optional) Pre-configured landmarks
+└── {SUBJECT}FlowProfile_smoothed.csv  # Breathing flow data
 ```
 
 ### Output
 
 ```
 {SUBJECT}_results/
-├── {SUBJECT}_cfd_data.h5              # HDF5 cache (85% size reduction)
-├── {SUBJECT}_tracking_locations.json  # Tracking locations (editable)
+├── {SUBJECT}_cfd_data.h5              # HDF5 cache (all timesteps)
+├── {SUBJECT}_cfd_data_light.h5        # Light HDF5 (single timestep, portable)
+├── {SUBJECT}_picked_points.json       # Tracking locations (EDIT THIS)
+├── {SUBJECT}_metadata.json            # System metadata
 ├── {SUBJECT}_key_time_points.json     # Detected breathing cycle time points
 ├── tracked_points/                    # CSV trajectory data
 ├── figures/                           # PNG images
@@ -147,7 +148,7 @@ ama --listsubjects
 
 ## Tracking Locations
 
-Phase 1 auto-generates a template in `{SUBJECT}_results/{SUBJECT}_tracking_locations.json`:
+Phase 1 auto-generates a template in `{SUBJECT}_results/{SUBJECT}_picked_points.json`:
 
 ```json
 {
