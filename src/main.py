@@ -3811,7 +3811,8 @@ def main(overwrite_existing: bool = False,
 
     Two-phase workflow:
     - Phase 1 (--prepare): Create HDF5, detect breathing cycle/remesh, create templates
-    - Phase 2 (--plotting): Generate analysis and plots using tracking JSON
+    - Phase 2 (--point-picker): Select anatomical landmarks on the airway surface
+    - Phase 3 (--plotting): Generate analysis and plots using picked points
     - All-in-one (--all): Run prepare + plotting in one pass (requires pre-configured tracking)
 
     Remesh handling:
@@ -4215,7 +4216,7 @@ def main(overwrite_existing: bool = False,
                 print(f"⚠️  Failed to store remesh metadata in HDF5: {e}")
                 print(f"   Continuing - remesh info will be in metadata.json only")
 
-            # Store flow profile in HDF5 (so Phase 2 doesn't need the CSV file)
+            # Store flow profile in HDF5 (so Phase 3 doesn't need the CSV file)
             if flow_profile_path:
                 from data_processing.trajectory import store_flow_profile
                 store_flow_profile(hdf5_file_path, flow_profile_path)
@@ -4263,7 +4264,7 @@ def main(overwrite_existing: bool = False,
         except Exception as e:
             print(f"❌ Failed to create interactive HTML: {e}")
 
-        # Create JSON config files for Phase 2
+        # Create JSON config files for Phase 2 (point picker) and Phase 3 (plotting)
         print(f"\n📋 Creating JSON config files...")
         try:
             from utils.file_processing import create_metadata_json, create_picked_points_template
@@ -4306,7 +4307,7 @@ def main(overwrite_existing: bool = False,
         print(f"\n2. Run point picker locally:")
         print(f"   ama --subject {subject_name} --point-picker --light-h5")
         print(f"\n3. Copy {subject_name}_picked_points.json back to cluster")
-        print(f"\n4. Run Phase 2 on cluster:")
+        print(f"\n4. Run Phase 3 on cluster:")
         print(f"   ama --subject {subject_name} --plotting")
 
         print(f"\n🖥️  For DIRECT editing (if interactive HTML works):")
@@ -4315,16 +4316,16 @@ def main(overwrite_existing: bool = False,
         print(f"\n2. Hover over points to identify Patch Number and Face Index")
         print(f"\n3. Edit the picked_points.json file:")
         print(f"   {results_dir}/{subject_name}_picked_points.json")
-        print(f"\n4. Run Phase 2:")
+        print(f"\n4. Run Phase 3:")
         print(f"   ama --subject {subject_name} --plotting")
         print("="*60)
 
         if not all_in_one_mode:
             return  # Exit early for prepare-only mode
 
-    # Handle plotting mode (Phase 2: Generate analysis using existing HDF5 and JSON)
+    # Handle plotting mode (Phase 3: Generate analysis using existing HDF5 and picked points)
     if plotting_mode:
-        print(f"\n📊 Plotting Mode: Phase 2 of two-phase workflow")
+        print(f"\n📊 Plotting Mode: Phase 3 of three-phase workflow")
         print("   This mode will:")
         print("   1. Use existing HDF5 file (skip CSV processing)")
         print("   2. Load tracking locations from results folder")
@@ -5692,7 +5693,7 @@ This pipeline processes CFD airway data to track anatomical points and analyze
 pressure, velocity, and acceleration relationships during breathing cycles.
 
 ═══════════════════════════════════════════════════════════════════════════════
-TWO-PHASE WORKFLOW (RECOMMENDED FOR NEW SUBJECTS)
+THREE-PHASE WORKFLOW (RECOMMENDED FOR NEW SUBJECTS)
 ═══════════════════════════════════════════════════════════════════════════════
 
 Phase 1: PREPARE - Convert CSV to HDF5, detect breathing cycle/remesh, create templates
@@ -5703,13 +5704,19 @@ Phase 1: PREPARE - Convert CSV to HDF5, detect breathing cycle/remesh, create te
    → Auto-detects remesh events
    → Creates interactive HTML and template JSON in {SUBJECT}_results/
 
-   After Phase 1: Use point picker GUI or interactive HTML to select landmarks.
+Phase 2: PICK POINTS - Select anatomical landmarks on the airway surface
+   ama --subject OSAMRI007 --point-picker
 
-Phase 2: PLOTTING - Generate all analysis and plots
-   ama --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+   → Opens PyVista GUI for interactive 3D point selection
+   → Click on airway surface to pick tracking locations
+   → Saves selected points to {SUBJECT}_results/{SUBJECT}_picked_points.json
+   → Alternative: edit picked_points.json manually using the interactive HTML
+
+Phase 3: PLOTTING - Generate all analysis and plots
+   ama --subject OSAMRI007 --plotting
 
    → Uses existing HDF5 file (skips CSV processing)
-   → Loads tracking locations from results folder
+   → Loads tracking locations from picked_points.json
    → Generates all analysis, tracking, and visualization outputs
    → Creates both normalized and original time PDFs for traceability
 
@@ -5799,22 +5806,21 @@ Setup: bash setup.sh   (or: conda env create -f environment.yml && conda activat
         description=description,
         formatter_class=CustomHelpFormatter,
         epilog='''
-Examples (Two-Phase Workflow - Recommended):
-  # Phase 1: Create HDF5 and interactive HTML for point selection
+Examples (Three-Phase Workflow - Recommended):
+  # Phase 1: Create HDF5 and interactive HTML
   ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
-  # Phase 1 with manual breathing cycle times (skips auto-detection prompt)
+  # Phase 1 with manual breathing cycle times (skips auto-detection)
   ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
 
-  # Phase 2: Generate all analysis and plots (after updating tracking JSON)
-  ama --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+  # Phase 2: Pick anatomical landmarks (opens PyVista GUI)
+  ama --subject OSAMRI007 --point-picker
 
-Examples (Point Picker - For selecting anatomical landmarks):
-  # Launch point picker with lightweight H5 (fast, portable)
+  # Phase 2 with custom H5 file
   ama --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data_light.h5
 
-  # Launch point picker with full H5
-  ama --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
+  # Phase 3: Generate all analysis and plots
+  ama --subject OSAMRI007 --plotting
 
 Examples (Custom XYZ Path - Data stored elsewhere):
   # Phase 1 with custom XYZ path (results still saved to ./OSAMRI007_results/)
@@ -5822,10 +5828,9 @@ Examples (Custom XYZ Path - Data stored elsewhere):
       --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
       --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
 
-  # Phase 2 with custom XYZ path
+  # Phase 3 with custom XYZ path
   ama --subject OSAMRI007 --plotting \\
-      --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
-      --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
+      --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables
 
 Examples (Other Commands):
   ama --subject OSAMRI007                    # Full analysis (legacy)
@@ -5870,9 +5875,9 @@ Examples (Other Commands):
 
     # Two-phase pipeline arguments
     parser.add_argument('--prepare', action='store_true',
-                      help='Phase 1: Convert CSV to HDF5, detect breathing cycle/remesh, create templates (no analysis)')
+                      help='Phase 1: Convert CSV to HDF5, detect breathing cycle/remesh, create templates')
     parser.add_argument('--plotting', action='store_true',
-                      help='Phase 2: Generate analysis and plots using existing HDF5 and tracking JSON')
+                      help='Phase 3: Generate analysis and plots using existing HDF5 and picked points')
     parser.add_argument('--all', action='store_true',
                       help='Run complete pipeline: prepare + tracking + plotting in one pass (requires pre-configured tracking locations)')
 
@@ -5896,7 +5901,7 @@ Examples (Other Commands):
     parser.add_argument('--remesh-after', type=str,
                       help='Override auto-detection: CSV filename of first timestep AFTER remesh')
     parser.add_argument('--point-picker', action='store_true',
-                      help='Launch PyVista-based interactive point picker (fast VTK picking for large datasets)')
+                      help='Phase 2: Launch PyVista GUI to select anatomical landmarks on airway surface')
     parser.add_argument('--h5-file', type=str,
                       help='Specify HDF5 file path for point picker (e.g., OSAMRI007_results/OSAMRI007_cfd_data_light.h5)')
     parser.add_argument('--picker-timestep', type=int,
@@ -5935,7 +5940,7 @@ Examples (Other Commands):
         else:
             print("ℹ️  No flow profile provided - will use CSV timestep data for breathing cycle detection")
     elif getattr(args, 'plotting', False):
-        # Phase 2: flow profile can come from HDF5 or command line
+        # Phase 3: flow profile can come from HDF5 or command line
         if args.flow_profile:
             flow_profile_path = Path(args.flow_profile)
             if not flow_profile_path.exists():

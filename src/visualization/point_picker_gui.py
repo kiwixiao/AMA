@@ -522,7 +522,7 @@ class PointPickerGUI(QMainWindow):
             self, 'Saved!',
             f"Saved {len(self.picked_points)} points ({named} named)\n\n"
             f"File: {self.tracking_json_path}\n\n"
-            f"Ready for Phase 2:\n"
+            f"Ready for Phase 3:\n"
             f"ama --subject {self.subject_name} --plotting"
         )
 

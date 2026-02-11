@@ -2596,7 +2596,7 @@ def create_picked_points_template(subject_name: str, output_dir: Path,
             "step2": "Run: ama --subject {subject} --point-picker",
             "step3": "Pick points interactively using the GUI",
             "step4": "Copy this file back to the cluster results folder",
-            "step5": "Run Phase 2: ama --subject {subject} --plotting"
+            "step5": "Run Phase 3: ama --subject {subject} --plotting"
         }
     }
 
@@ -2657,7 +2657,7 @@ def load_metadata(subject_name: str, results_dir: Path = None) -> Optional[Dict]
 
 def load_and_merge_configs(subject_name: str, results_dir: Path = None) -> Dict:
     """
-    Load and merge picked_points.json and metadata.json for Phase 2 processing.
+    Load and merge picked_points.json and metadata.json for Phase 3 processing.
 
     This function:
     1. Loads both JSON files from the results directory

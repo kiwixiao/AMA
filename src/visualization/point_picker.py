@@ -646,7 +646,7 @@ class PointPicker:
             print(f"\n📊 Summary: {named_count} named, {len(self.picked_points) - named_count} unnamed")
 
             self.save_tracking_locations()
-            print(f"\n✅ Ready for Phase 2! Run:")
+            print(f"\n✅ Ready for Phase 3! Run:")
             print(f"   ama --subject {self.subject_name} --plotting")
         else:
             print("\n⚠️  No points were selected. Nothing saved.")
