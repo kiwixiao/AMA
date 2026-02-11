@@ -3683,7 +3683,7 @@ def auto_detect_visualization_timestep(subject_name: str, flow_profile_path: str
 
     Priority:
     1. HDF5 metadata (if exists) - most reliable for plotting mode
-    2. CSV files + flow profile - for patch-selection mode
+    2. CSV files + flow profile - for prepare mode
 
     Args:
         subject_name: Name of the subject
@@ -3802,6 +3802,7 @@ def main(overwrite_existing: bool = False,
          smoothing_window: int = 20,
          patch_selection_mode: bool = False,
          plotting_mode: bool = False,
+         all_in_one_mode: bool = False,
          has_remesh: bool = False,
          remesh_before: str = None,
          remesh_after: str = None,
@@ -3810,12 +3811,18 @@ def main(overwrite_existing: bool = False,
     Main function to process CFD data and generate analysis plots.
 
     Two-phase workflow:
-    - Phase 1 (--patch-selection): Create HDF5, interactive HTML, and template JSON
+    - Phase 1 (--prepare): Create HDF5, detect breathing cycle/remesh, create templates
     - Phase 2 (--plotting): Generate analysis and plots using tracking JSON
+    - All-in-one (--all): Run prepare + plotting in one pass (requires pre-configured tracking)
 
     Remesh handling:
     - If --has-remesh is set, use coordinate-based mapping across mesh changes
     """
+    # Handle --all mode: run both prepare and plotting
+    if all_in_one_mode:
+        patch_selection_mode = True
+        plotting_mode = True
+
     # Determine subject name
     if subject_name is None:
         subject_name = auto_detect_subject()
@@ -4033,9 +4040,9 @@ def main(overwrite_existing: bool = False,
         
         return  # Exit early for interactive selector mode
 
-    # Handle patch-selection mode (Phase 1: Create HDF5, HTML, and template JSON)
+    # Handle prepare mode (Phase 1: Create HDF5, HTML, and template JSON)
     if patch_selection_mode:
-        print(f"\n📋 Patch Selection Mode: Phase 1 of two-phase workflow")
+        print(f"\n📋 Prepare Mode: Phase 1 of two-phase workflow")
         print("   This mode will:")
         print("   1. Convert raw CSV files to HDF5 format")
         print("   2. Create interactive HTML for patch/face selection")
@@ -4297,7 +4304,7 @@ def main(overwrite_existing: bool = False,
             raise
 
         print(f"\n" + "="*60)
-        print("✅ PATCH SELECTION MODE COMPLETE")
+        print("✅ PREPARE MODE COMPLETE")
         print("="*60)
         print(f"\nOutput files created in {results_dir}/:")
         print(f"   📦 {subject_name}_cfd_data.h5           (Full HDF5 - all timesteps)")
@@ -4325,7 +4332,8 @@ def main(overwrite_existing: bool = False,
         print(f"   python src/main.py --subject {subject_name} --plotting")
         print("="*60)
 
-        return  # Exit early for patch-selection mode
+        if not all_in_one_mode:
+            return  # Exit early for prepare-only mode
 
     # Handle plotting mode (Phase 2: Generate analysis using existing HDF5 and JSON)
     if plotting_mode:
@@ -4343,7 +4351,7 @@ def main(overwrite_existing: bool = False,
             print(f"❌ HDF5 file not found in:")
             print(f"   - {subject_name}_results/{subject_name}_cfd_data.h5")
             print(f"   - {subject_name}_cfd_data.h5")
-            print(f"   Run --patch-selection first to create it")
+            print(f"   Run --prepare first to create it")
             return
 
         print(f"✅ Found HDF5 file: {hdf5_file_path}")
@@ -5687,7 +5695,8 @@ def main(overwrite_existing: bool = False,
     print(f"   └── 📄 {subject_name}_key_time_points.json")
     print("\n✅ Analysis pipeline completed successfully!")
 
-if __name__ == '__main__':
+def cli_main():
+    """Entry point for the CLI tool (used by both `python src/main.py` and `ama` command)."""
     # Create custom help formatter for better formatting
     class CustomHelpFormatter(argparse.RawDescriptionHelpFormatter):
         def _format_action_invocation(self, action):
@@ -5715,16 +5724,15 @@ pressure, velocity, and acceleration relationships during breathing cycles.
 TWO-PHASE WORKFLOW (RECOMMENDED FOR NEW SUBJECTS)
 ═══════════════════════════════════════════════════════════════════════════════
 
-Phase 1: PATCH SELECTION - Convert CSV to HDF5 and create interactive HTML
-   python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+Phase 1: PREPARE - Convert CSV to HDF5, detect breathing cycle/remesh, create templates
+   python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
    → Converts raw CSV files to HDF5 format (85% size reduction)
    → Detects breathing cycle from flow profile
-   → Creates interactive HTML for manual patch/face selection
-   → Generates template tracking locations JSON in {SUBJECT}_results/
+   → Auto-detects remesh events
+   → Creates interactive HTML and template JSON in {SUBJECT}_results/
 
-   After Phase 1: Open the interactive HTML and update the tracking locations JSON
-   with correct patch_number and face_indices values for your anatomical landmarks.
+   After Phase 1: Use point picker GUI or interactive HTML to select landmarks.
 
 Phase 2: PLOTTING - Generate all analysis and plots
    python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
@@ -5738,11 +5746,11 @@ Phase 2: PLOTTING - Generate all analysis and plots
 
 DEMO USAGE SCENARIOS:
 
-1. 🚀 COMPLETE ANALYSIS FROM SCRATCH (Legacy - requires pre-configured tracking):
-   python src/main.py --subject OSAMRI007
+1. 🚀 COMPLETE ANALYSIS IN ONE PASS (requires pre-configured tracking):
+   python src/main.py --subject OSAMRI007 --all --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
-   → Processes all data, generates PDFs, creates interactive visualizations
-   → Outputs: CSV data, PDF reports, PNG figures, HTML visualizations
+   → Runs prepare + tracking + plotting in one pass
+   → Outputs: HDF5, CSV data, PDF reports, PNG figures, HTML visualizations
    → Time: ~5-10 minutes for full analysis
 
 2. 🔄 FORCE COMPLETE RERUN (overwrite existing data):
@@ -5822,10 +5830,10 @@ Setup: conda env create -f environment.yml && conda activate cfd-analysis
         epilog='''
 Examples (Two-Phase Workflow - Recommended):
   # Phase 1: Create HDF5 and interactive HTML for point selection
-  python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+  python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 
   # Phase 1 with manual breathing cycle times (skips auto-detection prompt)
-  python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
+  python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv --inhale-start 0.05 --transition 1.0 --exhale-end 2.2
 
   # Phase 2: Generate all analysis and plots (after updating tracking JSON)
   python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
@@ -5839,7 +5847,7 @@ Examples (Point Picker - For selecting anatomical landmarks):
 
 Examples (Custom XYZ Path - Data stored elsewhere):
   # Phase 1 with custom XYZ path (results still saved to ./OSAMRI007_results/)
-  python src/main.py --subject OSAMRI007 --patch-selection \\
+  python src/main.py --subject OSAMRI007 --prepare \\
       --xyz-path /data/cfd_simulations/OSAMRI007/xyz_tables \\
       --flow-profile /data/cfd_simulations/OSAMRI007/FlowProfile_smoothed.csv
 
@@ -5890,10 +5898,12 @@ Examples (Other Commands):
                       help='Smoothing window size for plot data (default: 20 time steps)')
 
     # Two-phase pipeline arguments
-    parser.add_argument('--patch-selection', action='store_true',
-                      help='Phase 1: Create interactive HTML and template JSON for patch/face selection (no plotting)')
+    parser.add_argument('--prepare', action='store_true',
+                      help='Phase 1: Convert CSV to HDF5, detect breathing cycle/remesh, create templates (no analysis)')
     parser.add_argument('--plotting', action='store_true',
                       help='Phase 2: Generate analysis and plots using existing HDF5 and tracking JSON')
+    parser.add_argument('--all', action='store_true',
+                      help='Run complete pipeline: prepare + tracking + plotting in one pass (requires pre-configured tracking locations)')
 
     # Input files for production workflow
     parser.add_argument('--flow-profile', type=str,
@@ -5924,8 +5934,8 @@ Examples (Other Commands):
     args = parser.parse_args()
 
     # Validate --flow-profile for production modes (now optional for Phase 1)
-    if getattr(args, 'patch_selection', False):
-        # Phase 1: flow profile is optional (will use Mode C if not provided)
+    if getattr(args, 'prepare', False) or getattr(args, 'all', False):
+        # Phase 1 / All mode: flow profile is optional (will use Mode C if not provided)
         if args.flow_profile:
             flow_profile_path = Path(args.flow_profile)
             if not flow_profile_path.exists():
@@ -5960,10 +5970,20 @@ Examples (Other Commands):
             print("📋 Available subjects:")
             for subject in subjects:
                 print(f"  • {subject}")
-                # Check if required files exist
-                flow_file = Path(f"{subject}FlowProfile.csv")
-                if flow_file.exists():
-                    print(f"    ✅ Flow profile found")
+                # Check for flow profile with base subject fallback (quiet check)
+                base = extract_base_subject(subject)
+                flow_candidates = [
+                    Path(f"{subject}FlowProfile.csv"),
+                    Path(f"{subject}FlowProfile_smoothed.csv"),
+                    Path(f"{base}FlowProfile.csv"),
+                    Path(f"{base}FlowProfile_smoothed.csv"),
+                ]
+                flow_file = next((f for f in flow_candidates if f.exists()), None)
+                if flow_file:
+                    if base != subject and not flow_file.name.startswith(subject):
+                        print(f"    ✅ Flow profile found (via base subject {base}): {flow_file.name}")
+                    else:
+                        print(f"    ✅ Flow profile found: {flow_file.name}")
                 else:
                     print(f"    ❌ Flow profile missing")
         else:
@@ -5980,7 +6000,7 @@ Examples (Other Commands):
 
         if not results_dir.exists():
             print(f"❌ ERROR: Results directory not found: {results_dir}")
-            print("   Run --patch-selection first to create HDF5 cache")
+            print("   Run --prepare first to create HDF5 cache")
             sys.exit(1)
 
         # Check for HDF5 file (custom path or default)
@@ -5994,7 +6014,7 @@ Examples (Other Commands):
             h5_file = results_dir / f"{args.subject}_cfd_data.h5"
             if not h5_file.exists():
                 print(f"❌ ERROR: HDF5 cache not found: {h5_file}")
-                print("   Run --patch-selection first to create HDF5 cache")
+                print("   Run --prepare first to create HDF5 cache")
                 sys.exit(1)
 
         print(f"📦 Loading HDF5: {h5_file}")
@@ -6029,9 +6049,14 @@ Examples (Other Commands):
          interactive_selector=getattr(args, 'interactive_selector', False),
          selector_timestep=args.selector_timestep,
          smoothing_window=getattr(args, 'smoothing_window', 20),
-         patch_selection_mode=getattr(args, 'patch_selection', False),
+         patch_selection_mode=getattr(args, 'prepare', False),
          plotting_mode=getattr(args, 'plotting', False),
+         all_in_one_mode=getattr(args, 'all', False),
          has_remesh=getattr(args, 'has_remesh', False),
          remesh_before=getattr(args, 'remesh_before', None),
          remesh_after=getattr(args, 'remesh_after', None),
-         flow_profile_path=getattr(args, 'flow_profile', None)) 
+         flow_profile_path=getattr(args, 'flow_profile', None))
+
+
+if __name__ == '__main__':
+    cli_main()

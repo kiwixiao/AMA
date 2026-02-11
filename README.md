@@ -96,7 +96,7 @@ The pipeline uses a two-phase workflow for better control and manual verificatio
 #### Phase 1: Patch Selection
 ```bash
 # Convert CSV to HDF5 and create interactive visualization for point selection
-python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+python src/main.py --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
 ```
 
 This phase:
@@ -166,7 +166,7 @@ done
 
 ### Tracking Locations
 
-The pipeline automatically generates a template tracking locations file during Phase 1 (`--patch-selection`).
+The pipeline automatically generates a template tracking locations file during Phase 1 (`--prepare`).
 Edit `{SUBJECT}_results/{SUBJECT}_tracking_locations.json` to define anatomical landmarks:
 
 ```json

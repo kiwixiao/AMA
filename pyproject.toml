@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ama"
+version = "1.0.0"
+description = "Airway Metrics Analysis - CFD analysis pipeline for respiratory flow visualization"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+
+dependencies = [
+    "numpy>=1.21.0",
+    "pandas>=1.3.0",
+    "scipy>=1.7.0",
+    "matplotlib>=3.4.0",
+    "plotly>=5.3.0",
+    "seaborn>=0.11.0",
+    "h5py>=3.1.0",
+    "tables>=3.6.1",
+    "tqdm>=4.65.0",
+    "scikit-learn>=1.0.0",
+    "psutil>=5.8.0",
+]
+
+[project.optional-dependencies]
+gui = [
+    "pyvista>=0.32.0",
+    "pyvistaqt>=0.9.0",
+    "vtk>=9.0.0",
+]
+dev = [
+    "pytest>=6.0.0",
+    "jupyter>=1.0.0",
+    "numba>=0.56.0",
+    "pyvista>=0.32.0",
+    "pyvistaqt>=0.9.0",
+    "vtk>=9.0.0",
+]
+
+[project.scripts]
+ama = "main:cli_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

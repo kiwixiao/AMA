@@ -3,6 +3,7 @@
 *.pkl
 *.json
 *.stl
+*.h5
 
 # Results and output directories
 *_results/
@@ -26,6 +27,13 @@ __pycache__/
 *.so
 .pytest_cache/
 
+# Python packaging / build
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
 # Jupyter notebooks
 *.ipynb
 .ipynb_checkpoints/
@@ -48,18 +56,15 @@ Thumbs.db
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
 
-# Conda environments
-.conda/ # HDF5 cache files (large binary files)
-*.h5
-*_cfd_data.h5
+# Conda
+.conda/
 
-# Results directories (generated data)
-*_results/
-*_xyz_tables/
-*_xyz_tables_with_patches/
-STLoutput/
-VdotN/
+# Lock files
+uv.lock
+
+# Autonomous agent state
 .autonomous/

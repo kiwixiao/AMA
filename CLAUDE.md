@@ -4,231 +4,196 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a sophisticated CFD (Computational Fluid Dynamics) analysis pipeline for respiratory flow visualization and analysis. The system processes time-series CFD simulation data to analyze airflow patterns, pressure dynamics, and velocity/acceleration relationships in respiratory tract anatomy.
+CFD (Computational Fluid Dynamics) analysis pipeline for respiratory airway flow visualization. Processes time-series CFD simulation data to analyze airflow patterns, pressure dynamics, and velocity/acceleration relationships in respiratory tract anatomy.
 
-## Environment Setup
+## Installation
 
-### Primary Setup Method
 ```bash
-# Using conda (recommended)
-conda env create -f environment.yml
-conda activate cfd-analysis
+# Clone and install as a package
+git clone <repository-url>
+cd newMetrics
+pip install -e .
 
-# Or using setup script
-./setup.sh
+# Verify
+ama --listsubjects
 ```
 
-### Alternative Setup
+For development:
 ```bash
-# Using pip
-python -m venv cfd-env
-source cfd-env/bin/activate  # Linux/macOS
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
-### Verification
-```bash
-python src/main.py --listsubjects
+## Three-Phase Workflow
+
+```
+Phase 1: Prepare     →  CSV files in       →  HDF5 + templates out
+Phase 2: Pick Points  →  HDF5 in           →  picked_points.json out
+  (manual edits)      →  fix configs if needed
+Phase 3: Analyze      →  HDF5 + configs in  →  PDFs + HTMLs out
 ```
 
-## Core Commands
-
-### Two-Phase Workflow (Recommended)
-
-The pipeline uses a two-phase workflow for better control:
-
+### Phase 1: Prepare (`--prepare`)
+Convert raw CSV data to HDF5, detect breathing cycle and remesh, create templates.
 ```bash
-# Phase 1: Patch Selection - Convert CSV to HDF5 and create interactive visualization
-python src/main.py --subject OSAMRI007 --patch-selection --flow-profile OSAMRI007FlowProfile_smoothed.csv
+ama --subject OSAMRI007 --prepare --flow-profile OSAMRI007FlowProfile_smoothed.csv
+```
+Outputs in `{SUBJECT}_results/`:
+- `{SUBJECT}_cfd_data.h5` — full HDF5 (all timesteps, flow profile embedded)
+- `{SUBJECT}_cfd_data_light.h5` — single-timestep HDF5 (portable, for point picking)
+- `{SUBJECT}_metadata.json` — system metadata (remesh info, breathing cycle)
+- `{SUBJECT}_picked_points.json` — empty template for landmark selection
+- `interactive/` — HTML visualization for browsing the surface
 
-# After Phase 1: Update {SUBJECT}_results/{SUBJECT}_tracking_locations.json with correct patch/face values
+### Phase 2: Pick Points (`--point-picker`)
+Select anatomical landmarks using PyVista GUI.
+```bash
+ama --subject OSAMRI007 --point-picker --h5-file OSAMRI007_results/OSAMRI007_cfd_data.h5
+```
+Saves selections to `{SUBJECT}_results/{SUBJECT}_picked_points.json`.
 
-# Phase 2: Plotting - Generate all analysis and plots
-python src/main.py --subject OSAMRI007 --plotting --flow-profile OSAMRI007FlowProfile_smoothed.csv
+**Between Phase 2 and 3**, you can manually edit:
+- `picked_points.json` — fix coordinates, add/remove landmarks, correct patch/face values
+- `metadata.json` — override `manual_remesh_timesteps_ms` if auto-detection was wrong
+
+### Phase 3: Analyze (`--plotting`)
+Generate all tracking data, PDF reports, and HTML visualizations.
+```bash
+ama --subject OSAMRI007 --plotting
+```
+No `--flow-profile` needed — reads from HDF5. Only needed as fallback for older HDF5 files.
+
+### All-in-One (`--all`)
+Run prepare + analyze in one pass (skips point picking, requires pre-configured tracking locations).
+```bash
+ama --subject OSAMRI007 --all --flow-profile OSAMRI007FlowProfile_smoothed.csv
 ```
 
-### Legacy Mode (Single Command)
+### Other Commands
 ```bash
-# Complete analysis for a subject (requires pre-configured tracking locations)
-python src/main.py --subject OSAMRI007
-
-# Force complete rerun (overwrite existing data)
-python src/main.py --subject OSAMRI007 --forcererun
-
-# List available subjects
-python src/main.py --listsubjects
-```
-
-### Advanced Analysis Options
-```bash
-# Custom patch analysis with different radii
-python src/main.py --subject OSAMRI007 --patchradii 1.0 3.0 7.0
-
-# Custom raw data directory
-python src/main.py --subject OSAMRI007 --rawdir qDNS_xyz_tables
-
-# Disable interactive visualization for faster processing
-python src/main.py --subject OSAMRI007 --disablevisualization
-
-# Highlight patch regions only (quick visualization)
-python src/main.py --subject OSAMRI007 --highlight-patches --patch-timestep 100
-
-# Handle remeshed data (when mesh changes during simulation)
-python src/main.py --subject OSAMRI007 --has-remesh --remesh-before file1.csv --remesh-after file2.csv
+ama --subject OSAMRI007 --prepare --flow-profile profile.csv \
+    --inhale-start 0.05 --transition 1.0 --exhale-end 2.2     # Manual breathing cycle
+ama --subject OSAMRI007 --forcererun                  # Force rerun
+ama --subject OSAMRI007 --patchradii 1.0 3.0 7.0 --normalangle 45.0
+ama --subject OSAMRI007 --rawdir qDNS_xyz_tables      # Custom raw dir
+ama --subject OSAMRI007 --xyz-path /data/xyz          # Custom XYZ path
+ama --subject OSAMRI007 --disablevisualization        # Skip HTML output
+ama --subject OSAMRI007 --disablepatchanalysis        # Single-point only
+ama --subject OSAMRI007 --highlight-patches --patch-timestep 100
+ama --subject OSAMRI007 --raw-surface --surface-timestep 50
+ama --subject OSAMRI007 --has-remesh --remesh-before file1.csv --remesh-after file2.csv
+ama --listsubjects
 ```
 
 ### Testing
 ```bash
-# Test XYZ file format handling
-python test_xyz_formats.py
-
-# Basic functionality test
-python src/main.py --listsubjects
+python test_xyz_formats.py           # XYZ format handling
+ama --listsubjects          # Basic functionality
 ```
 
-## Architecture Overview
+## Architecture
 
-### Core Entry Point
-- `src/main.py` - Main pipeline orchestration and execution
+### Monolithic Orchestrator Pattern
 
-### Key Modules
-- `src/utils/file_processing.py` - File I/O, data preprocessing, breathing cycle detection
-- `src/utils/parallel_csv_processing.py` - High-performance parallel processing with 8-10x speedup
-- `src/data_processing/trajectory.py` - HDF5 caching and trajectory analysis
-- `src/visualization/` - Interactive and static visualizations
-- `src/surface_painting/` - 3D surface painting and region analysis
+`src/main.py` (~5900 lines) is the monolithic entry point that owns the entire pipeline. It directly contains:
+- All argparse CLI definitions
+- Surface normal calculation (`calculate_surface_normal` using PCA via `NearestNeighbors`)
+- Connected point finding with DBSCAN clustering and normal filtering
+- Point-in-circle filtering (radius + patch + normal constraints)
+- All plotting orchestration for PDFs and HTML output
+- Breathing cycle detection integration
+- Remesh handling (auto-detection + manual override)
 
-### Data Processing Pipeline (Two-Phase)
+### Module Dependency Graph
 
-**Phase 1: Patch Selection (`--patch-selection`)**
-1. CSV tables converted to HDF5 with 85% size reduction
-2. Breathing cycle detection from flow profile
-3. Interactive HTML generation for manual point selection
-4. Template tracking locations JSON creation
+```
+src/main.py (orchestrator)
+├── src/utils/file_processing.py       ← File I/O, CSV loading, breathing cycle detection,
+│                                        flow profile search, subject name extraction
+├── src/utils/parallel_csv_processing.py ← ProcessPoolExecutor-based parallel tracking
+│                                        with memory-aware auto-tuning (psutil)
+├── src/utils/signal_processing.py     ← Zero-crossing detection, smart label positioning
+│                                        (shared by main.py and cfd_analysis_3x3.py)
+├── src/data_processing/trajectory.py  ← HDF5 creation/reading, CSV→HDF5 conversion,
+│                                        dimension scanning for remesh detection
+├── src/analysis/patch_region_analysis.py ← Enhanced circle finding, patch statistics,
+│                                          multi-radius patch analysis
+├── src/visualization/
+│   ├── surface_plots.py               ← Plotly 3D interactive HTML generation
+│   ├── cfd_analysis_3x3.py            ← Multi-page 3x3 panel PDF reports
+│   ├── patch_visualization.py         ← Patch region highlighting
+│   ├── interactive_selection.py       ← Dash-based browser point selector
+│   ├── point_picker.py               ← PyVista-based native 3D point picker
+│   └── point_picker_gui.py           ← GUI wrapper for point picker
+```
 
-**Phase 2: Plotting (`--plotting`)**
-1. Load HDF5 cache (skip CSV processing)
-2. Load tracking locations from results folder
-3. Surface-normal filtering for anatomical landmark tracking
-4. Pressure-velocity-acceleration correlation analysis
-5. Generate PDF reports (both normalized and original time versions)
-6. Interactive HTML 3D visualizations with patch regions
+### Data Flow
+
+```
+Phase 1 (--prepare):
+  {SUBJECT}_xyz_tables/*.csv  ──→  parallel_csv_processing  ──→  {SUBJECT}_results/{SUBJECT}_cfd_data.h5
+  FlowProfile_smoothed.csv    ──→  file_processing           ──→  breathing cycle bounds
+  HDF5 + cycle bounds         ──→  surface_plots              ──→  interactive HTML + template JSON
+
+Phase 2 (--point-picker):
+  {SUBJECT}_cfd_data.h5       ──→  PyVista GUI               ──→  picked_points.json
+
+Phase 3 (--plotting):
+  {SUBJECT}_cfd_data.h5                    ──→  parallel tracking (HDF5-based)  ──→  tracked_points/*.csv
+  {SUBJECT}_picked_points.json             ──→  point/patch region extraction
+  tracked_points/*.csv + flow profile      ──→  cfd_analysis_3x3               ──→  PDF reports
+  tracked_points/*.csv + HDF5              ──→  surface_plots                   ──→  interactive HTML
+```
+
+### Key Processing Concepts
+
+**Patch/Face Model**: CFD mesh data uses `Patch Number` to identify mesh boundary regions and `Face Index` for individual faces within a patch. Tracking locations are defined by (patch_number, face_indices, coordinates).
+
+**Surface Normal Filtering**: Points within a radius are filtered using PCA-based normal calculation + DBSCAN connectivity clustering. This ensures tracked regions stay on the same anatomical surface rather than bleeding through thin walls. Controlled by `--normalangle` (default 60°).
+
+**Parallel Processing Strategy**: `parallel_csv_processing.py` auto-selects between multiple HDF5 tracking methods based on dataset size and available memory. Uses `ProcessPoolExecutor` with `psutil`-based process count tuning. Methods include: memory-safe multicore, optimized multicore, and optimized index lookup.
+
+**Remesh Handling**: Simulations may change mesh topology mid-run. Auto-detected by scanning CSV file dimensions for point count changes. Can be manually overridden via `manual_remesh_timesteps_ms` in `metadata.json`, or with CLI flags `--has-remesh` / `--remesh-before` / `--remesh-after`.
+
+**Mesh Variant Subject Names**: Subject names may have mesh resolution prefixes (e.g., `2mmeshOSAMRI007`, `less1mmesh_OSAMRI007`). `extract_base_subject()` in `file_processing.py` strips these to find the base subject name for flow profile lookup.
 
 ## Data Structure
 
-### Expected Input Structure
-```
-project_root/
-├── {SUBJECT}_xyz_tables/                    # Raw CFD data (CSV files)
-├── {SUBJECT}FlowProfile.csv                 # Breathing flow data
-├── {SUBJECT}FlowProfile_smoothed.csv        # Smoothed flow data
-└── {SUBJECT}_tracking_locations.json        # Anatomical landmark definitions
-```
+### Input Files
+- `{SUBJECT}_xyz_tables/` — Raw CFD CSV files (one per timestep)
+- `{SUBJECT}FlowProfile_smoothed.csv` — Breathing flow rate data (or base subject's)
 
-### Generated Output Structure
-```
-project_root/
-├── {SUBJECT}_xyz_tables_with_patches/       # Processed CFD data with patch numbers
-└── {SUBJECT}_results/                       # All analysis results (self-contained)
-    ├── {SUBJECT}_cfd_data.h5                # HDF5 cache (85% size reduction)
-    ├── {SUBJECT}_tracking_locations.json    # Tracking locations (editable)
-    ├── {SUBJECT}_key_time_points.json       # Detected key time points
-    ├── tracked_points/                      # CSV trajectory data
-    ├── figures/                             # PNG images
-    ├── reports/                             # PDF analysis reports
-    │   ├── {SUBJECT}_3x3_panel_smoothed_with_markers_normalized_time.pdf
-    │   ├── {SUBJECT}_3x3_panel_smoothed_with_markers_original_time.pdf
-    │   └── ...                              # Other PDF reports
-    └── interactive/                         # HTML visualizations
-        ├── {SUBJECT}_surface_patches_interactive_first_breathing_cycle_t{time}ms.html
-        └── {SUBJECT}_patch_regions_t{time}ms.html
-```
+### Output Structure
+All results are self-contained in `{SUBJECT}_results/`:
+- `{SUBJECT}_cfd_data.h5` — HDF5 cache (85% size reduction from CSV)
+- `{SUBJECT}_cfd_data_light.h5` — Single-timestep HDF5 for portable point picking
+- `{SUBJECT}_metadata.json` — System metadata (remesh, breathing cycle, do not edit unless overriding remesh)
+- `{SUBJECT}_picked_points.json` — Landmark selections (editable)
+- `tracked_points/` — Per-location CSV trajectory data
+- `reports/` — PDF analysis reports (3x3 panels in both normalized and original time)
+- `figures/` — PNG images
+- `interactive/` — HTML 3D visualizations
 
-## Performance Characteristics
+### XYZ File Naming
+Two formats supported:
+- Integer (milliseconds): `XYZ_Internal_Table_table_2387.csv`
+- Scientific notation (seconds): `XYZ_Internal_Table_table_2.300000e+00.csv`
 
-### Optimization Features
-- **Parallel Processing**: 4-8x faster than sequential processing
-- **HDF5 Caching**: 10-20x faster access for repeated operations
-- **Memory-Efficient**: ~2GB per process, handles large datasets without overflow
-- **Storage Optimization**: 85% compression with HDF5 format
+## Common Issues
 
-### System Requirements
-- **RAM**: 16GB+ recommended (32GB+ for large datasets)
-- **CPU**: 8+ cores recommended for optimal parallel processing
-- **Storage**: 50GB+ free space for processing large CFD datasets
+**HDF5 Lock Errors**: Remove `{SUBJECT}_results/{SUBJECT}_cfd_data.h5` and rerun with `--forcererun`.
 
-## Key Configuration Files
+**Memory Issues**: Set `export OMP_NUM_THREADS=4` to limit parallel processes.
 
-### Tracking Locations
-Phase 1 (`--patch-selection`) auto-generates a template in `{SUBJECT}_results/{SUBJECT}_tracking_locations.json`:
-```json
-{
-  "locations": [
-    {
-      "description": "Posterior border of soft palate",
-      "patch_number": 17,
-      "face_indices": [12220],
-      "coordinates": [-0.0101, 0.0081, 0.0386]
-    }
-  ],
-  "combinations": [],
-  "_instructions": {
-    "step1": "Open the interactive HTML visualization",
-    "step2": "Hover over points to see Patch Number and Face Index",
-    "step3": "Update patch_number, face_indices, and coordinates",
-    "step4": "Run --plotting to generate analysis"
-  }
-}
-```
-
-### Key Output Files
-- **Interactive HTML**: `{SUBJECT}_surface_patches_interactive_first_breathing_cycle_t{time}ms.html`
-- **3x3 Panels** (both time versions for traceability):
-  - `{SUBJECT}_3x3_panel_smoothed_with_markers_normalized_time.pdf` - Time starts at 0s
-  - `{SUBJECT}_3x3_panel_smoothed_with_markers_original_time.pdf` - Original timestamps
-
-## Common Issues and Solutions
-
-### Memory Issues
-```bash
-# Reduce parallel processes if memory limited
-export OMP_NUM_THREADS=4
-python src/main.py --subject OSAMRI007
-```
-
-### HDF5 Lock Errors
-```bash
-# Remove locked files and force rerun
-rm -f *_cfd_data.h5
-python src/main.py --subject OSAMRI007 --forcererun
-```
-
-### macOS sklearn threadpoolctl Error
-On macOS with conda, you may see `'NoneType' object has no attribute 'split'` errors from sklearn.
-This is a known macOS + conda issue with threadpoolctl library version detection.
-The pipeline handles this gracefully by falling back to default surface normals.
-This issue does not occur on Linux.
-
-### File Naming Conventions
-The system handles multiple XYZ table naming formats:
-- Integer format: `XYZ_Internal_Table_table_2387.csv` (milliseconds)
-- Scientific notation: `XYZ_Internal_Table_table_2.300000e+00.csv` (seconds)
+**macOS sklearn threadpoolctl**: Known `'NoneType' object has no attribute 'split'` error from sklearn on macOS + conda. Pipeline handles this by falling back to default surface normals. Does not occur on Linux.
 
 ## Development Notes
 
-### Code Style
-- Follow existing patterns in the codebase for imports and error handling
-- Use parallel processing utilities from `utils/parallel_csv_processing.py`
+- `src/main.py` imports are set up for both direct execution (`python src/main.py`) and module execution, via `sys.path` manipulation at the top
+- Optional imports (`SURFACE_PLOTS_AVAILABLE`, `VISUALIZATION_AVAILABLE`, `CFD_ANALYSIS_AVAILABLE`) use try/except with fallback stubs so the pipeline degrades gracefully
+- All coordinates are in meters (column names: `X (m)`, `Y (m)`, `Z (m)`)
+- Area vectors use columns: `Area[i] (m^2)`, `Area[j] (m^2)`, `Area[k] (m^2)`
+- Timestamps in filenames may be milliseconds (int) or seconds (float) — `extract_timestep_from_filename()` handles both
+- Follow existing patterns for imports and error handling
+- Use `parallel_csv_processing.py` utilities for any new data processing
 - Maintain chronological file ordering when processing time-series data
-
-### Dependencies
-The project uses scientific computing stack (numpy, pandas, scipy) with specialized libraries:
-- HDF5 processing: h5py, tables
-- Visualization: matplotlib, plotly, seaborn, pyvista
-- Performance: numba, scikit-learn
-- System monitoring: psutil, tqdm
-
-### File Processing
-- Always use the existing file processing utilities for CFD data
-- Maintain compatibility with both CSV and HDF5 formats
-- Respect breathing cycle boundaries when filtering time-series data
+- Respect breathing cycle boundaries when filtering data
