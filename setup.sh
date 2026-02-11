@@ -5,8 +5,18 @@
 
 set -e
 
+# Pass --dev for editable install (developers who modify source code)
+# Default is regular install (end users)
+DEV_MODE=false
+if [ "$1" = "--dev" ]; then
+    DEV_MODE=true
+fi
+
 echo "AMA Setup"
 echo "========="
+if [ "$DEV_MODE" = true ]; then
+    echo "(developer mode - editable install)"
+fi
 echo ""
 
 # Detect environment manager
@@ -30,10 +40,13 @@ if [ "$USE_CONDA" = true ]; then
         conda env create -f environment.yml
     fi
 
-    # Activate and install ama as editable package
     eval "$(conda shell.bash hook)"
     conda activate "${ENV_NAME}"
-    pip install -e .
+    if [ "$DEV_MODE" = true ]; then
+        pip install -e .
+    else
+        pip install .
+    fi
 
     echo ""
     echo "Done. To use:"
@@ -52,7 +65,11 @@ else
     fi
 
     source "${VENV_DIR}/bin/activate"
-    pip install -e ".[gui]"
+    if [ "$DEV_MODE" = true ]; then
+        pip install -e ".[gui]"
+    else
+        pip install ".[gui]"
+    fi
 
     echo ""
     echo "Done. To use:"
