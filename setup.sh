@@ -52,7 +52,7 @@ else
     fi
 
     source "${VENV_DIR}/bin/activate"
-    pip install -e .
+    pip install -e ".[gui]"
 
     echo ""
     echo "Done. To use:"
