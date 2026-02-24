@@ -1791,7 +1791,7 @@ def create_metrics_vs_time_plot(df, subject_name, description, patch_number, fac
     
     plt.close()
 
-def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
+def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
@@ -1803,37 +1803,48 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
+        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
+        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
-    print(f"\nGenerating clean symmetric comparison panel (without markers) for {len(locations)} locations...")
+    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
+    print(f"\nGenerating clean symmetric comparison panel (without markers) for {len(locations)} locations{filter_text}...")
+
+    # Filter DataFrames to breathing cycle range if requested
+    if filter_breathing_cycle and breathing_cycle_s:
+        t_start = breathing_cycle_s.get('inhale_start')
+        t_end = breathing_cycle_s.get('exhale_end')
+        if t_start is not None and t_end is not None:
+            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
+                   for k, df in dfs.items()}
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
     # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
     fig = plt.figure(figsize=(20, 6 * n_locations + 2))
     gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
-    
+
     # Find mutual ranges for each variable across all points
     v_max = 0
     a_max = 0
     p_max = 0
-    
+
     # Find the global minimum time to renormalize time to start from 0
     global_time_min = float('inf')
     for loc in locations:
         df = dfs[loc['key']]
         times = df['Time (s)'].values
         global_time_min = min(global_time_min, times.min())
-    
+
     # The original inhale-exhale transition time
-    original_inhale_exhale = 1.034  # This is the value from the command output
-    
+    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
+
     # Calculate the normalized inhale-exhale transition time
     normalized_inhale_exhale = original_inhale_exhale - global_time_min
-    
+
     print(f"Renormalizing time for clean plot: Original range started at {global_time_min:.3f}s")
     print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {normalized_inhale_exhale:.3f}s")
     
@@ -1967,38 +1978,66 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
             label.set_fontweight('bold')
     
     # Add a colorbar for time
+    normalized_time_max = max([data['normalized_times'].max() for data in processed_data.values()])
+    normalized_time_min = 0
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
     cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-    
-    # Add a note about the normalized time
-    fig.text(0.5, 0.01, f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.', 
-            fontsize=10, ha='center', va='bottom')
-    
+
+    # Add breathing cycle timepoint markers on the colorbar
+    if breathing_cycle_s:
+        for label_key, label_text in [
+            ('inhale_start', 'Inhale Start'),
+            ('transition', 'Transition'),
+            ('exhale_end', 'Exhale End'),
+        ]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                if normalized_time_min <= t_display <= normalized_time_max:
+                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
+                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                               transform=cbar.ax.get_yaxis_transform(),
+                               fontsize=7, va='center', ha='left')
+
+    # Add a note about the normalized time with all breathing cycle timepoints
+    if breathing_cycle_s:
+        bc_parts = []
+        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                bc_parts.append(f'{label_text}: {t_display:.3f}s')
+        note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
+    else:
+        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
+    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
+
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Clean Version)', 
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Clean Version)',
                  fontsize=16, fontweight='bold', y=0.98)
-    
+
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-    
+
     # Save to main PDF if provided
     if pdf is not None:
         pdf.savefig(fig, bbox_inches='tight')
-    
+
     # Save a standalone PDF version to pdfs directory
+    suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_clean.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_clean{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_clean.pdf"
+        standalone_filename = f"{subject_name}_3x3_panel_clean{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
-    
+
     plt.close()
 
-def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
+def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
@@ -2009,37 +2048,48 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, loc
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
+        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
+        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
-    print(f"\nGenerating symmetric comparison panel for {len(locations)} locations...")
+    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
+    print(f"\nGenerating symmetric comparison panel for {len(locations)} locations{filter_text}...")
+
+    # Filter DataFrames to breathing cycle range if requested
+    if filter_breathing_cycle and breathing_cycle_s:
+        t_start = breathing_cycle_s.get('inhale_start')
+        t_end = breathing_cycle_s.get('exhale_end')
+        if t_start is not None and t_end is not None:
+            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
+                   for k, df in dfs.items()}
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
     # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
     fig = plt.figure(figsize=(20, 6 * n_locations + 2))
     gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
-    
+
     # Find mutual ranges for each variable across all points
     v_max = 0
     a_max = 0
     p_max = 0
-    
+
     # Find the global minimum time to renormalize time to start from 0
     global_time_min = float('inf')
     for loc in locations:
         df = dfs[loc['key']]
         times = df['Time (s)'].values
         global_time_min = min(global_time_min, times.min())
-    
+
     # The original inhale-exhale transition time
-    original_inhale_exhale = 1.034  # This is the value from the command output
-    
+    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
+
     # Calculate the normalized inhale-exhale transition time
     normalized_inhale_exhale = original_inhale_exhale - global_time_min
-    
+
     print(f"Renormalizing time: Original range started at {global_time_min:.3f}s")
     print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {normalized_inhale_exhale:.3f}s")
     
@@ -2245,38 +2295,65 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, loc
     fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=3, fontsize=12)
     
     # Add a colorbar for time
+    normalized_time_max_val = max([data['normalized_times'].max() for data in processed_data.values()])
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
     cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-    
-    # Add a note about the normalized time
-    fig.text(0.5, 0.01, f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.', 
-            fontsize=10, ha='center', va='bottom')
-    
+
+    # Add breathing cycle timepoint markers on the colorbar
+    if breathing_cycle_s:
+        for label_key, label_text in [
+            ('inhale_start', 'Inhale Start'),
+            ('transition', 'Transition'),
+            ('exhale_end', 'Exhale End'),
+        ]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                if 0 <= t_display <= normalized_time_max_val:
+                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
+                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                               transform=cbar.ax.get_yaxis_transform(),
+                               fontsize=7, va='center', ha='left')
+
+    # Add a note about the normalized time with all breathing cycle timepoints
+    if breathing_cycle_s:
+        bc_parts = []
+        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                bc_parts.append(f'{label_text}: {t_display:.3f}s')
+        note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
+    else:
+        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
+    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
+
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin', 
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin',
                  fontsize=16, fontweight='bold', y=0.98)
-    
+
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-    
+
     # Save to main PDF if provided
     if pdf is not None:
         pdf.savefig(fig)
-    
+
     # Save a standalone PDF version to pdfs directory
+    suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel.pdf"
+        standalone_filename = f"{subject_name}_3x3_panel{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
-    
+
     plt.close()
 
-def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None, locations=None):
+def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
@@ -2288,12 +2365,23 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         pdf: PDF object to save the plot to (can be None if standalone_output=True)
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
+        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
+        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
-    print(f"\nGenerating smoothed symmetric comparison panel for {len(locations)} locations...")
+    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
+    print(f"\nGenerating smoothed symmetric comparison panel for {len(locations)} locations{filter_text}...")
+
+    # Filter DataFrames to breathing cycle range if requested
+    if filter_breathing_cycle and breathing_cycle_s:
+        t_start = breathing_cycle_s.get('inhale_start')
+        t_end = breathing_cycle_s.get('exhale_end')
+        if t_start is not None and t_end is not None:
+            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
+                   for k, df in dfs.items()}
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
@@ -2318,11 +2406,11 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         global_time_min = min(global_time_min, times.min())
     
     # The original inhale-exhale transition time
-    original_inhale_exhale = 1.034  # This is the value from the command output
-    
+    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
+
     # Calculate the normalized inhale-exhale transition time
     normalized_inhale_exhale = original_inhale_exhale - global_time_min
-    
+
     print(f"Renormalizing time for smoothed plot: Original range started at {global_time_min:.3f}s")
     print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {normalized_inhale_exhale:.3f}s")
     
@@ -2510,38 +2598,65 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
     fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=1, fontsize=12)
     
     # Add a colorbar for time
+    normalized_time_max_val = max([data['normalized_times'].max() for data in processed_data.values()])
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
     cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-    
+
+    # Add breathing cycle timepoint markers on the colorbar
+    if breathing_cycle_s:
+        for label_key, label_text in [
+            ('inhale_start', 'Inhale Start'),
+            ('transition', 'Transition'),
+            ('exhale_end', 'Exhale End'),
+        ]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                if 0 <= t_display <= normalized_time_max_val:
+                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
+                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                               transform=cbar.ax.get_yaxis_transform(),
+                               fontsize=7, va='center', ha='left')
+
     # Add a note about the normalized time and smoothing
-    fig.text(0.5, 0.01, f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.', 
-            fontsize=10, ha='center', va='bottom')
-    
+    if breathing_cycle_s:
+        bc_parts = []
+        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig - global_time_min
+                bc_parts.append(f'{label_text}: {t_display:.3f}s')
+        note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
+    else:
+        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
+    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
+
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSmoothed, Symmetric Plots Centered at Origin', 
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSmoothed, Symmetric Plots Centered at Origin',
                  fontsize=16, fontweight='bold', y=0.98)
-    
+
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-    
+
     # Save to main PDF if provided
     if pdf is not None:
         pdf.savefig(fig)
-    
+
     # Save a standalone PDF version to pdfs directory
+    suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smooth.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smooth{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_smooth.pdf"
+        standalone_filename = f"{subject_name}_3x3_panel_smooth{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
-    
+
     plt.close()
 
-def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir=None, locations=None, use_original_time=False):
+def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir=None, locations=None, use_original_time=False, breathing_cycle_s=None, filter_breathing_cycle=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     This version applies a moving average smoothing filter with window size 20 to all data,
@@ -2555,13 +2670,24 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
         use_original_time: If True, use original timestamps; if False, normalize to start from 0
+        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
+        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
     time_mode = "original" if use_original_time else "normalized"
-    print(f"\nGenerating smoothed symmetric comparison panel with zero-crossing markers for {len(locations)} locations ({time_mode} time)...")
+    filter_text = ", filtered to breathing cycle" if filter_breathing_cycle else ""
+    print(f"\nGenerating smoothed symmetric comparison panel with zero-crossing markers for {len(locations)} locations ({time_mode} time{filter_text})...")
+
+    # Filter DataFrames to breathing cycle range if requested
+    if filter_breathing_cycle and breathing_cycle_s:
+        t_start = breathing_cycle_s.get('inhale_start')
+        t_end = breathing_cycle_s.get('exhale_end')
+        if t_start is not None and t_end is not None:
+            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
+                   for k, df in dfs.items()}
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
@@ -2585,7 +2711,7 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
     time_offset = 0 if use_original_time else global_time_min
 
     # The original inhale-exhale transition time
-    original_inhale_exhale = 1.034  # This is the value from the command output
+    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
 
     # Calculate the display inhale-exhale transition time
     display_inhale_exhale = original_inhale_exhale if use_original_time else (original_inhale_exhale - global_time_min)
@@ -2889,39 +3015,70 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
             label.set_fontweight('bold')
     
     # Add a colorbar for time
+    display_time_max = max([data['display_times'].max() for data in processed_data.values()])
+    display_time_min = min([data['display_times'].min() for data in processed_data.values()])
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
     cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-    
+
+    # Add breathing cycle timepoint markers on the colorbar
+    if breathing_cycle_s:
+        for label_key, label_text in [
+            ('inhale_start', 'Inhale Start'),
+            ('transition', 'Transition'),
+            ('exhale_end', 'Exhale End'),
+        ]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig if use_original_time else (t_orig - global_time_min)
+                if display_time_min <= t_display <= display_time_max:
+                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
+                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                               transform=cbar.ax.get_yaxis_transform(),
+                               fontsize=7, va='center', ha='left')
+
     # Add a note about the time mode and smoothing
-    if use_original_time:
+    if breathing_cycle_s:
+        bc_parts = []
+        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
+            t_orig = breathing_cycle_s.get(label_key)
+            if t_orig is not None:
+                t_display = t_orig if use_original_time else (t_orig - global_time_min)
+                bc_parts.append(f'{label_text}: {t_display:.3f}s')
+        bc_text = ', '.join(bc_parts)
+        if use_original_time:
+            note_text = f'Note: Using original timestamps. {bc_text}.\nData smoothed with moving average (window size: 20).'
+        else:
+            note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n{bc_text}. Data smoothed with moving average (window size: 20).'
+    elif use_original_time:
         note_text = f'Note: Using original timestamps. Inhale-exhale transition at {display_inhale_exhale:.3f}s.\nData smoothed with moving average (window size: 20).'
     else:
         note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {display_inhale_exhale:.3f}s. Data smoothed with moving average (window size: 20).'
     fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
-    
+
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Smoothed Version with Zero-Crossing Markers)', 
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Smoothed Version with Zero-Crossing Markers)',
                  fontsize=16, fontweight='bold', y=0.98)
-    
+
     # Adjust layout
     plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-    
+
     # Save to main PDF if provided
     if pdf is not None:
         pdf.savefig(fig)
-    
+
     # Save a standalone PDF version to pdfs directory
     time_suffix = "_original_time" if use_original_time else "_normalized_time"
+    filter_suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}{filter_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}.pdf"
+        standalone_filename = f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}{filter_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
-    
+
     plt.close()
     print("Smoothed symmetric comparison panel with markers completed.")
 
@@ -5534,30 +5691,60 @@ def main(overwrite_existing: bool = False,
             dfs[key] = df
             locations_for_panel.append({'key': key, 'description': description})
 
+        # Construct breathing_cycle_s dict from metadata (all values in milliseconds, convert to seconds)
+        # Note: inhale_exhale_transition may be overwritten to seconds by flow profile re-detection,
+        # so we read directly from the original metadata source for reliable ms->s conversion.
+        breathing_cycle_s = None
+        _bc_meta = None
+        if metadata_json and 'breathing_cycle' in metadata_json:
+            _bc_meta = metadata_json['breathing_cycle']
+        if _bc_meta and _bc_meta.get('inhale_exhale_transition_ms') is not None:
+            breathing_cycle_s = {
+                'inhale_start': _bc_meta['start_time_ms'] / 1000.0 if _bc_meta.get('start_time_ms') is not None else start_time / 1000.0,
+                'transition': _bc_meta['inhale_exhale_transition_ms'] / 1000.0,
+                'exhale_end': _bc_meta['end_time_ms'] / 1000.0 if _bc_meta.get('end_time_ms') is not None else None,
+            }
+            print(f"Breathing cycle parameters (seconds): {breathing_cycle_s}")
+        elif inhale_exhale_transition is not None:
+            # Fallback: inhale_exhale_transition was set from flow profile (already in seconds)
+            breathing_cycle_s = {
+                'inhale_start': start_time / 1000.0,
+                'transition': inhale_exhale_transition,  # Already in seconds from flow profile detection
+                'exhale_end': end_time / 1000.0 if end_time else None,
+            }
+            print(f"Breathing cycle parameters (seconds, from flow profile): {breathing_cycle_s}")
+
         # Create symmetric comparison panel if we have data
         if len(dfs) >= 1:
             print(f"Creating symmetric comparison panels for {subject_name} with {len(locations_for_panel)} locations...")
             # 1. Clean version (no markers)
-            create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+            create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
             # 2. Detailed version (with zero-crossing markers)
-            create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+            create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
             # 3. Smoothed version (with moving average)
-            create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir, locations_for_panel)
+            create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
             # 4. Smoothed version with zero-crossing markers (normalized time - starts at 0)
-            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, use_original_time=False)
+            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s)
 
             # 5. Smoothed version with zero-crossing markers (original time - for traceability)
-            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True)
+            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s)
+
+            # 6. Filtered breathing cycle versions (only within inhale_start to exhale_end)
+            if breathing_cycle_s:
+                print(f"\nGenerating filtered breathing cycle panels...")
+                create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                print(f"Filtered breathing cycle panels completed.")
 
             print(f"Symmetric comparison panels completed.")
-            
-            # 6. CFD Analysis 3x3 panels (new)
+
+            # 7. CFD Analysis 3x3 panels
             if CFD_ANALYSIS_AVAILABLE:
                 print(f"Creating CFD Analysis 3x3 panels for {subject_name}...")
-                
+
                 # Load both single point and patch data for CFD analysis
                 single_point_dfs, patch_dfs = load_cfd_data_for_analysis(
                     subject_name=subject_name,
@@ -5565,21 +5752,27 @@ def main(overwrite_existing: bool = False,
                     enable_patch_analysis=enable_patch_analysis,
                     patch_radii=patch_radii
                 )
-                
+
                 # Create CFD analysis panels if we have data
                 if single_point_dfs or patch_dfs:
                     # Create CFD analysis 3x3 panel (smoothed, no markers) - shared scale
-                    create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
+                    create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
                     # Create CFD analysis 3x3 panel with markers (smoothed, with markers) - shared scale
-                    create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
+                    create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
                     # Create CFD analysis 3x3 panels with original data scale (each subplot auto-scaled)
-                    create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
-                    create_cfd_analysis_3x3_panel_with_markers_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir)
+                    create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
+                    create_cfd_analysis_3x3_panel_with_markers_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
                     # Create CFD analysis 3x3 panels with both normalized and original TIME versions
-                    create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir)
+                    create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
+
+                    # Create filtered breathing cycle versions of 3x3 panels
+                    if breathing_cycle_s:
+                        print(f"\nGenerating filtered breathing cycle 3x3 panels...")
+                        create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
+                        print(f"Filtered breathing cycle 3x3 panels completed.")
 
                     print(f"CFD Analysis 3x3 panels completed (shared scale + original data scale + time versions).")
                 else:

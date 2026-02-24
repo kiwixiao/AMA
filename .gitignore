@@ -70,3 +70,6 @@ CLAUDE.md
 
 # Autonomous agent state
 .autonomous/
+
+# Local documentation
+docs/
