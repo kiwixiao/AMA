@@ -89,9 +89,7 @@ except ImportError as e:
 try:
     from visualization.cfd_analysis_3x3 import (
         create_cfd_analysis_3x3_panel,
-        create_cfd_analysis_3x3_panel_with_markers,
         create_cfd_analysis_3x3_panel_original_scale,
-        create_cfd_analysis_3x3_panel_with_markers_both_time_versions,
         load_cfd_data_for_analysis
     )
     CFD_ANALYSIS_AVAILABLE = True
@@ -1790,7 +1788,7 @@ def create_metrics_vs_time_plot(df, subject_name, description, patch_number, fac
     
     plt.close()
 
-def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
+def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, timemap=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
@@ -1803,22 +1801,14 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
         breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
-        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
+        timemap: If True, colorbar shows dual labels: normalized time + original CFD time
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
-    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
-    print(f"\nGenerating clean symmetric comparison panel (without markers) for {len(locations)} locations{filter_text}...")
-
-    # Filter DataFrames to breathing cycle range if requested
-    if filter_breathing_cycle and breathing_cycle_s:
-        t_start = breathing_cycle_s.get('inhale_start')
-        t_end = breathing_cycle_s.get('exhale_end')
-        if t_start is not None and t_end is not None:
-            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
-                   for k, df in dfs.items()}
+    timemap_text = " (Timemap)" if timemap else ""
+    print(f"\nGenerating clean symmetric comparison panel (without markers) for {len(locations)} locations{timemap_text}...")
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
@@ -1981,7 +1971,15 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
     normalized_time_min = 0
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
-    cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
+    # Timemap: change colorbar label and tick labels to show dual time
+    if timemap and breathing_cycle_s:
+        cbar.set_label('Time (s) [CFD Time (s)]', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
+        # Replace tick labels with dual-format
+        yticks = cbar.ax.get_yticks()
+        new_labels = [f'{t:.3f}s [{t + global_time_min:.3f}s]' for t in yticks]
+        cbar.ax.set_yticklabels(new_labels, fontsize=6)
+    else:
+        cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
 
     # Add breathing cycle timepoint markers on the colorbar
     if breathing_cycle_s:
@@ -1995,9 +1993,14 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
                 t_display = t_orig - global_time_min
                 if normalized_time_min <= t_display <= normalized_time_max:
                     cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
-                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
-                               transform=cbar.ax.get_yaxis_transform(),
-                               fontsize=7, va='center', ha='left')
+                    if timemap:
+                        cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s [{t_orig:.3f}s])',
+                                   transform=cbar.ax.get_yaxis_transform(),
+                                   fontsize=7, va='center', ha='left')
+                    else:
+                        cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                                   transform=cbar.ax.get_yaxis_transform(),
+                                   fontsize=7, va='center', ha='left')
 
     # Add a note about the normalized time with all breathing cycle timepoints
     if breathing_cycle_s:
@@ -2008,12 +2011,15 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
                 t_display = t_orig - global_time_min
                 bc_parts.append(f'{label_text}: {t_display:.3f}s')
         note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
+        if timemap:
+            note_text += '\nTimemap: colorbar shows normalized time [original CFD time].'
     else:
         note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
     fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
 
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Clean Version)',
+    timemap_title = " (Timemap)" if timemap else ""
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Clean Version){timemap_title}',
                  fontsize=16, fontweight='bold', y=0.98)
 
     # Adjust layout
@@ -2024,7 +2030,7 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
         pdf.savefig(fig, bbox_inches='tight')
 
     # Save a standalone PDF version to pdfs directory
-    suffix = "_filtered" if filter_breathing_cycle else ""
+    suffix = "_timemap" if timemap else ""
     if pdfs_dir:
         standalone_filename = pdfs_dir / f"{subject_name}_symmetric_raw{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
@@ -2036,323 +2042,7 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
 
     plt.close()
 
-def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
-    """
-    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
-    All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
-
-    Arguments:
-        dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
-        subject_name: Name of the subject
-        pdf: PDF object to save the plot to (can be None if standalone_output=True)
-        pdfs_dir: Directory for PDF output
-        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
-        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
-        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
-    """
-    if locations is None or len(locations) == 0:
-        print("Warning: No locations provided for comparison panel")
-        return
-
-    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
-    print(f"\nGenerating symmetric comparison panel for {len(locations)} locations{filter_text}...")
-
-    # Filter DataFrames to breathing cycle range if requested
-    if filter_breathing_cycle and breathing_cycle_s:
-        t_start = breathing_cycle_s.get('inhale_start')
-        t_end = breathing_cycle_s.get('exhale_end')
-        if t_start is not None and t_end is not None:
-            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
-                   for k, df in dfs.items()}
-
-    # Calculate grid dimensions based on number of locations
-    n_locations = len(locations)
-    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
-    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
-    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
-
-    # Find mutual ranges for each variable across all points
-    v_max = 0
-    a_max = 0
-    p_max = 0
-
-    # Find the global minimum time to renormalize time to start from 0
-    global_time_min = float('inf')
-    for loc in locations:
-        df = dfs[loc['key']]
-        times = df['Time (s)'].values
-        global_time_min = min(global_time_min, times.min())
-
-    # The original inhale-exhale transition time
-    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
-
-    # Calculate the normalized inhale-exhale transition time
-    normalized_inhale_exhale = original_inhale_exhale - global_time_min
-
-    print(f"Renormalizing time: Original range started at {global_time_min:.3f}s")
-    print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {normalized_inhale_exhale:.3f}s")
-    
-    # Process each dataset to find ranges, zero crossings, and precompute derived values
-    processed_data = {}
-    for loc in locations:
-        df = dfs[loc['key']]
-        
-        # Get the data
-        times = df['Time (s)'].values
-        vdotn = df['VdotN'].values * 1000  # Convert from m/s to mm/s
-        pressure = df['Total Pressure (Pa)'].values
-        
-        # Normalize time to start from 0
-        normalized_times = times - global_time_min
-        
-        # Calculate acceleration
-        dt = times[1] - times[0]  # Use original time for dt calculation
-        dvdotn = np.diff(vdotn)
-        adotn = np.append(dvdotn / dt, dvdotn[-1] / dt)  # Already in mm/s² since vdotn is in mm/s
-        
-        # Find zero-crossings and other relevant points
-        # Index of velocity crossing zero (from negative to positive)
-        vel_zero_idxs = np.where(np.diff(np.signbit(vdotn)))[0]
-        vel_zero_times = times[vel_zero_idxs]
-        vel_zero_normalized = normalized_times[vel_zero_idxs]
-        
-        # Index of acceleration crossing zero
-        acc_zero_idxs = np.where(np.diff(np.signbit(adotn)))[0]
-        acc_zero_times = times[acc_zero_idxs]
-        acc_zero_normalized = normalized_times[acc_zero_idxs]
-        
-        # Update max values
-        v_max = max(v_max, np.max(np.abs(vdotn)))
-        a_max = max(a_max, np.max(np.abs(adotn)))
-        p_max = max(p_max, np.max(np.abs(pressure)))
-        
-        # Store processed data for easy access during plotting
-        processed_data[loc['key']] = {
-            'normalized_times': normalized_times,
-            'times': times,
-            'vdotn': vdotn,
-            'pressure': pressure,
-            'adotn': adotn,
-            'vel_zero_normalized': vel_zero_normalized,
-            'acc_zero_normalized': acc_zero_normalized
-        }
-        
-        # Print zero crossing info
-        print(f"\nZero crossings for {loc['description']}:")
-        print(f"  Velocity zero crossings: {len(vel_zero_times)} at times: {', '.join([f'{t:.3f}s' for t in vel_zero_times])}")
-        print(f"  Acceleration zero crossings: {len(acc_zero_times)} at times: {', '.join([f'{t:.3f}s' for t in acc_zero_times])}")
-    
-    # Add a small margin to prevent data from being exactly on the edge
-    v_max *= 1.05
-    a_max *= 1.05
-    p_max *= 1.05
-    
-    # Common settings for all subplots
-    LABEL_SIZE = 11.2  # Reduced by 20% from 14
-    TITLE_SIZE = 17  # Increased by 20% from 14
-    
-    # Create a custom colormap that transitions at the normalized inhale-exhale point
-    normalized_time_max = max([data['normalized_times'].max() for data in processed_data.values()])
-    norm = plt.Normalize(0, normalized_time_max)  # Start from 0 for normalized time
-    transition_norm = normalized_inhale_exhale / normalized_time_max
-    
-    # Ensure color points are in increasing order
-    # Clamp transition points to valid range [0, 1]
-    transition_norm = max(0.1, min(0.9, transition_norm))  # Keep transition between 10% and 90%
-    
-    colors = [
-        (0, 'darkblue'),
-        (max(0.01, transition_norm - 0.05), 'blue'),
-        (max(0.02, transition_norm - 0.005), 'lightblue'),
-        (transition_norm, 'white'),
-        (min(0.98, transition_norm + 0.005), 'pink'),
-        (min(0.99, transition_norm + 0.05), 'red'),
-        (1, 'darkred')
-    ]
-    
-    # Sort colors by position to ensure increasing order
-    colors = sorted(colors, key=lambda x: x[0])
-    
-    custom_cmap = LinearSegmentedColormap.from_list('custom_diverging', colors)
-    
-    # Create the 3x3 grid of plots
-    for i, loc in enumerate(locations):
-        data = processed_data[loc['key']]
-        
-        # Get the processed data
-        normalized_times = data['normalized_times']
-        vdotn = data['vdotn']
-        pressure = data['pressure']
-        adotn = data['adotn']
-        vel_zero_normalized = data['vel_zero_normalized']
-        acc_zero_normalized = data['acc_zero_normalized']
-        
-        # Convert to mm/s and mm/s² for plotting
-        vdotn_mm = vdotn * 1000  # Convert from m/s to mm/s
-        adotn_mm = adotn * 1000  # Convert from m/s² to mm/s²
-        v_max_mm = v_max * 1000  # Convert m/s to mm/s
-        a_max_mm = a_max * 1000  # Convert m/s² to mm/s²
-        
-        # 1. Plot p vs v
-        ax1 = fig.add_subplot(gs[i, 0])
-        scatter1 = ax1.scatter(vdotn_mm, pressure, c=normalized_times, cmap=custom_cmap, norm=norm)
-        ax1.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        ax1.set_xlim(-v_max_mm, v_max_mm)
-        ax1.set_ylim(-p_max, p_max)
-        ax1.set_xlabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax1.grid(True, alpha=0.3)
-        # Format tick labels
-        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
-            label.set_fontweight('bold')
-        
-        # Add markers for zero crossings
-        for t_normalized in vel_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax1.plot(vdotn_mm[idx], pressure[idx], 'o', color='lime', markersize=8, alpha=0.7)
-        
-        for t_normalized in acc_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax1.plot(vdotn_mm[idx], pressure[idx], 's', color='yellow', markersize=8, alpha=0.7)
-        
-        # Mark inhale-exhale transition point
-        inhale_exhale_idx = np.abs(normalized_times - normalized_inhale_exhale).argmin()
-        ax1.plot(vdotn_mm[inhale_exhale_idx], pressure[inhale_exhale_idx], '*', color='black', markersize=12)
-        
-        # 2. Plot p vs a
-        ax2 = fig.add_subplot(gs[i, 1])
-        scatter2 = ax2.scatter(adotn_mm, pressure, c=normalized_times, cmap=custom_cmap, norm=norm)
-        ax2.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        ax2.set_xlim(-a_max_mm, a_max_mm)
-        ax2.set_ylim(-p_max, p_max)
-        ax2.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax2.grid(True, alpha=0.3)
-        # Format tick labels
-        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
-            label.set_fontweight('bold')
-        
-        # Add markers for zero crossings
-        for t_normalized in vel_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax2.plot(adotn_mm[idx], pressure[idx], 'o', color='lime', markersize=8, alpha=0.7)
-        
-        for t_normalized in acc_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax2.plot(adotn_mm[idx], pressure[idx], 's', color='yellow', markersize=8, alpha=0.7)
-        
-        # Mark inhale-exhale transition point
-        ax2.plot(adotn_mm[inhale_exhale_idx], pressure[inhale_exhale_idx], '*', color='black', markersize=12)
-        
-        # 3. Plot v vs a
-        ax3 = fig.add_subplot(gs[i, 2])
-        scatter3 = ax3.scatter(adotn_mm, vdotn_mm, c=normalized_times, cmap=custom_cmap, norm=norm)
-        ax3.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-        ax3.set_xlim(-a_max_mm, a_max_mm)
-        ax3.set_ylim(-v_max_mm, v_max_mm)
-        ax3.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax3.grid(True, alpha=0.3)
-        # Format tick labels
-        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
-            label.set_fontweight('bold')
-        
-        # Add markers for zero crossings
-        for t_normalized in vel_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax3.plot(adotn_mm[idx], vdotn_mm[idx], 'o', color='lime', markersize=8, alpha=0.7)
-        
-        for t_normalized in acc_zero_normalized:
-            # Find closest data point
-            idx = np.abs(normalized_times - t_normalized).argmin()
-            ax3.plot(adotn_mm[idx], vdotn_mm[idx], 's', color='yellow', markersize=8, alpha=0.7)
-        
-        # Mark inhale-exhale transition point
-        ax3.plot(adotn_mm[inhale_exhale_idx], vdotn_mm[inhale_exhale_idx], '*', color='black', markersize=12)
-    
-    # Add a legend
-    handles = [
-        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='lime', markersize=8, alpha=0.7, linestyle='None'),
-        plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='yellow', markersize=8, alpha=0.7, linestyle='None'),
-        plt.Line2D([0], [0], marker='*', color='w', markerfacecolor='black', markersize=12, linestyle='None')
-    ]
-    labels = ['Velocity Zero Crossing', 'Acceleration Zero Crossing', 'Inhale-Exhale Transition']
-    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, 0.02), ncol=3, fontsize=12)
-    
-    # Add a colorbar for time
-    normalized_time_max_val = max([data['normalized_times'].max() for data in processed_data.values()])
-    cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
-    cbar = plt.colorbar(scatter1, cax=cax)
-    cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-
-    # Add breathing cycle timepoint markers on the colorbar
-    if breathing_cycle_s:
-        for label_key, label_text in [
-            ('inhale_start', 'Inhale Start'),
-            ('transition', 'Transition'),
-            ('exhale_end', 'Exhale End'),
-        ]:
-            t_orig = breathing_cycle_s.get(label_key)
-            if t_orig is not None:
-                t_display = t_orig - global_time_min
-                if 0 <= t_display <= normalized_time_max_val:
-                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
-                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
-                               transform=cbar.ax.get_yaxis_transform(),
-                               fontsize=7, va='center', ha='left')
-
-    # Add a note about the normalized time with all breathing cycle timepoints
-    if breathing_cycle_s:
-        bc_parts = []
-        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
-            t_orig = breathing_cycle_s.get(label_key)
-            if t_orig is not None:
-                t_display = t_orig - global_time_min
-                bc_parts.append(f'{label_text}: {t_display:.3f}s')
-        note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
-    else:
-        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
-    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
-
-    # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin',
-                 fontsize=16, fontweight='bold', y=0.98)
-
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-
-    # Save to main PDF if provided
-    if pdf is not None:
-        pdf.savefig(fig)
-
-    # Save a standalone PDF version to pdfs directory
-    suffix = "_filtered" if filter_breathing_cycle else ""
-    if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_raw_markers{suffix}.pdf"
-        plt.savefig(standalone_filename, bbox_inches='tight')
-        print(f"Saved standalone PDF: {standalone_filename}")
-    else:
-        standalone_filename = f"{subject_name}_symmetric_raw_markers{suffix}.pdf"
-        plt.savefig(standalone_filename, bbox_inches='tight')
-        print(f"Saved standalone PDF: {standalone_filename}")
-
-    plt.close()
-
-def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, filter_breathing_cycle=False):
+def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=None, locations=None, breathing_cycle_s=None, timemap=False):
     """
     Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
     All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
@@ -2365,22 +2055,14 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         pdfs_dir: Directory for PDF output
         locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
         breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
-        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
+        timemap: If True, colorbar shows dual labels: normalized time + original CFD time
     """
     if locations is None or len(locations) == 0:
         print("Warning: No locations provided for comparison panel")
         return
 
-    filter_text = " (filtered to breathing cycle)" if filter_breathing_cycle else ""
-    print(f"\nGenerating smoothed symmetric comparison panel for {len(locations)} locations{filter_text}...")
-
-    # Filter DataFrames to breathing cycle range if requested
-    if filter_breathing_cycle and breathing_cycle_s:
-        t_start = breathing_cycle_s.get('inhale_start')
-        t_end = breathing_cycle_s.get('exhale_end')
-        if t_start is not None and t_end is not None:
-            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
-                   for k, df in dfs.items()}
+    timemap_text = " (Timemap)" if timemap else ""
+    print(f"\nGenerating smoothed symmetric comparison panel for {len(locations)} locations{timemap_text}...")
 
     # Calculate grid dimensions based on number of locations
     n_locations = len(locations)
@@ -2600,7 +2282,14 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
     normalized_time_max_val = max([data['normalized_times'].max() for data in processed_data.values()])
     cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
     cbar = plt.colorbar(scatter1, cax=cax)
-    cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
+    # Timemap: change colorbar label and tick labels to show dual time
+    if timemap and breathing_cycle_s:
+        cbar.set_label('Time (s) [CFD Time (s)]', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
+        yticks = cbar.ax.get_yticks()
+        new_labels = [f'{t:.3f}s [{t + global_time_min:.3f}s]' for t in yticks]
+        cbar.ax.set_yticklabels(new_labels, fontsize=6)
+    else:
+        cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
 
     # Add breathing cycle timepoint markers on the colorbar
     if breathing_cycle_s:
@@ -2614,9 +2303,14 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
                 t_display = t_orig - global_time_min
                 if 0 <= t_display <= normalized_time_max_val:
                     cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
-                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
-                               transform=cbar.ax.get_yaxis_transform(),
-                               fontsize=7, va='center', ha='left')
+                    if timemap:
+                        cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s [{t_orig:.3f}s])',
+                                   transform=cbar.ax.get_yaxis_transform(),
+                                   fontsize=7, va='center', ha='left')
+                    else:
+                        cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
+                                   transform=cbar.ax.get_yaxis_transform(),
+                                   fontsize=7, va='center', ha='left')
 
     # Add a note about the normalized time and smoothing
     if breathing_cycle_s:
@@ -2627,12 +2321,15 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
                 t_display = t_orig - global_time_min
                 bc_parts.append(f'{label_text}: {t_display:.3f}s')
         note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n' + ', '.join(bc_parts) + '.'
+        if timemap:
+            note_text += '\nTimemap: colorbar shows normalized time [original CFD time].'
     else:
         note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {normalized_inhale_exhale:.2f}s.'
     fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
 
     # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSmoothed, Symmetric Plots Centered at Origin',
+    timemap_title = " (Timemap)" if timemap else ""
+    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSmoothed, Symmetric Plots Centered at Origin{timemap_title}',
                  fontsize=16, fontweight='bold', y=0.98)
 
     # Adjust layout
@@ -2643,7 +2340,7 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         pdf.savefig(fig)
 
     # Save a standalone PDF version to pdfs directory
-    suffix = "_filtered" if filter_breathing_cycle else ""
+    suffix = "_timemap" if timemap else ""
     if pdfs_dir:
         standalone_filename = pdfs_dir / f"{subject_name}_symmetric_smooth{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
@@ -2654,432 +2351,6 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
         print(f"Saved standalone PDF: {standalone_filename}")
 
     plt.close()
-
-def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir=None, locations=None, use_original_time=False, breathing_cycle_s=None, filter_breathing_cycle=False):
-    """
-    Create a symmetric NxM panel comparison of pressure, velocity, and acceleration across anatomical points.
-    This version applies a moving average smoothing filter with window size 20 to all data,
-    and also adds markers and text labels for zero crossings.
-    All plots are made symmetric about the origin (0,0) and share the same axis range for easy comparison.
-
-    Arguments:
-        dfs: Dictionary of DataFrames, with keys corresponding to anatomical locations
-        subject_name: Name of the subject
-        pdf: PDF object to save the plot to
-        pdfs_dir: Directory for PDF output
-        locations: List of location dictionaries with 'key' and 'description' fields (from JSON)
-        use_original_time: If True, use original timestamps; if False, normalize to start from 0
-        breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
-        filter_breathing_cycle: If True and breathing_cycle_s provided, filter data to breathing cycle range
-    """
-    if locations is None or len(locations) == 0:
-        print("Warning: No locations provided for comparison panel")
-        return
-
-    time_mode = "original" if use_original_time else "normalized"
-    filter_text = ", filtered to breathing cycle" if filter_breathing_cycle else ""
-    print(f"\nGenerating smoothed symmetric comparison panel with zero-crossing markers for {len(locations)} locations ({time_mode} time{filter_text})...")
-
-    # Filter DataFrames to breathing cycle range if requested
-    if filter_breathing_cycle and breathing_cycle_s:
-        t_start = breathing_cycle_s.get('inhale_start')
-        t_end = breathing_cycle_s.get('exhale_end')
-        if t_start is not None and t_end is not None:
-            dfs = {k: df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)].copy()
-                   for k, df in dfs.items()}
-
-    # Calculate grid dimensions based on number of locations
-    n_locations = len(locations)
-    # Create figure with dynamic layout (n_locations rows x 3 columns for P, V, A)
-    fig = plt.figure(figsize=(20, 6 * n_locations + 2))
-    gs = fig.add_gridspec(n_locations, 3, hspace=0.3, wspace=0.3)
-
-    # Find mutual ranges for each variable across all points
-    v_max = 0
-    a_max = 0
-    p_max = 0
-
-    # Find the global minimum time to renormalize time to start from 0
-    global_time_min = float('inf')
-    for loc in locations:
-        df = dfs[loc['key']]
-        times = df['Time (s)'].values
-        global_time_min = min(global_time_min, times.min())
-
-    # Time offset for normalization (0 if using original time)
-    time_offset = 0 if use_original_time else global_time_min
-
-    # The original inhale-exhale transition time
-    original_inhale_exhale = breathing_cycle_s['transition'] if breathing_cycle_s else 1.034
-
-    # Calculate the display inhale-exhale transition time
-    display_inhale_exhale = original_inhale_exhale if use_original_time else (original_inhale_exhale - global_time_min)
-
-    if use_original_time:
-        print(f"Using original timestamps: Range starts at {global_time_min:.3f}s")
-        print(f"Inhale-exhale transition at {original_inhale_exhale:.3f}s")
-    else:
-        print(f"Normalizing time: Original range started at {global_time_min:.3f}s")
-        print(f"Inhale-exhale transition: Original at {original_inhale_exhale:.3f}s, Normalized at {display_inhale_exhale:.3f}s")
-    
-    # Define the improved moving average smoothing function that handles edge cases
-    def moving_average(data, window_size=20):
-        """
-        Apply a moving average filter to smooth the data, properly handling edge cases.
-        For edge points where a full window is not available, the original data values are kept.
-        """
-        if len(data) < window_size:
-            return data.copy()  # Return a copy of original data if too short
-            
-        # Initialize the output array with original data (will keep edges unchanged)
-        smoothed = data.copy()
-        
-        # Only smooth the points where we have enough data for a full window
-        half_window = window_size // 2
-        for i in range(half_window, len(data) - half_window):
-            # Calculate average only where we have a full window
-            smoothed[i] = np.mean(data[i-half_window:i+half_window+1])
-            
-        return smoothed
-    
-    # Process each dataset to find ranges, zero crossings, and precompute derived values
-    processed_data = {}
-    for loc in locations:
-        df = dfs[loc['key']]
-
-        # Get the data
-        times = df['Time (s)'].values
-        vdotn = df['VdotN'].values * 1000  # Convert from m/s to mm/s
-        pressure = df['Total Pressure (Pa)'].values
-
-        # Apply time offset (0 for original time, global_time_min for normalized)
-        display_times = times - time_offset
-
-        # Calculate acceleration
-        dt = times[1] - times[0]  # Use original time for dt calculation
-        dvdotn = np.diff(vdotn)
-        adotn = np.append(dvdotn / dt, dvdotn[-1] / dt)  # Already in mm/s² since vdotn is in mm/s
-
-        # Find sign changes in original data before smoothing (for accurate zero crossings)
-        v_crossings = find_zero_crossings(display_times, vdotn)
-        a_crossings = find_zero_crossings(display_times, adotn)
-        p_crossings = find_zero_crossings(display_times, pressure)
-
-        # Apply smoothing to all data
-        vdotn_smooth = moving_average(vdotn)
-        adotn_smooth = moving_average(adotn)
-        pressure_smooth = moving_average(pressure)
-        
-        # Update max values
-        v_max = max(v_max, np.max(np.abs(vdotn_smooth)))
-        a_max = max(a_max, np.max(np.abs(adotn_smooth)))
-        p_max = max(p_max, np.max(np.abs(pressure_smooth)))
-        
-        # Store processed data for easy access during plotting
-        processed_data[loc['key']] = {
-            'display_times': display_times,
-            'times': times,
-            'vdotn': vdotn_smooth,
-            'pressure': pressure_smooth,
-            'adotn': adotn_smooth,
-            'v_crossings': v_crossings,
-            'a_crossings': a_crossings,
-            'p_crossings': p_crossings
-        }
-
-    # Add a small margin to prevent data from being exactly on the edge
-    v_max *= 1.05
-    a_max *= 1.05
-    p_max *= 1.05
-
-    # Common settings for all subplots
-    LABEL_SIZE = 11.2  # Reduced by 20% from 14
-    TITLE_SIZE = 17  # Increased by 20% from 14
-
-    # Create a custom colormap that transitions at the inhale-exhale point
-    display_time_min = min([data['display_times'].min() for data in processed_data.values()])
-    display_time_max = max([data['display_times'].max() for data in processed_data.values()])
-    norm = plt.Normalize(display_time_min, display_time_max)
-    transition_norm = (display_inhale_exhale - display_time_min) / (display_time_max - display_time_min)
-    
-    # Ensure color points are in increasing order
-    # Clamp transition points to valid range [0, 1]
-    transition_norm = max(0.1, min(0.9, transition_norm))  # Keep transition between 10% and 90%
-    
-    colors = [
-        (0, 'darkblue'),
-        (max(0.01, transition_norm - 0.05), 'blue'),
-        (max(0.02, transition_norm - 0.005), 'lightblue'),
-        (transition_norm, 'white'),
-        (min(0.98, transition_norm + 0.005), 'pink'),
-        (min(0.99, transition_norm + 0.05), 'red'),
-        (1, 'darkred')
-    ]
-    
-    # Sort colors by position to ensure increasing order
-    colors = sorted(colors, key=lambda x: x[0])
-    
-    custom_cmap = LinearSegmentedColormap.from_list('custom_diverging', colors)
-    
-    # Create the 3x3 grid of plots
-    for i, loc in enumerate(locations):
-        data = processed_data[loc['key']]
-
-        # Get the processed data
-        display_times = data['display_times']
-        vdotn = data['vdotn']
-        pressure = data['pressure']
-        adotn = data['adotn']
-        v_crossings = data['v_crossings']
-        a_crossings = data['a_crossings']
-        p_crossings = data['p_crossings']
-
-        # Initialize label tracking for collision detection
-        ax1_labels = []
-        ax2_labels = []
-        ax3_labels = []
-
-        # 1. Plot p vs v
-        ax1 = fig.add_subplot(gs[i, 0])
-        scatter1 = ax1.scatter(vdotn, pressure, c=display_times, cmap=custom_cmap, norm=norm)
-        ax1.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax1.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-
-        # Mark the zero crossings in the p vs v plot
-        for v_cross in v_crossings:
-            t_idx = np.abs(display_times - v_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - v_cross)).argmin()
-            p_at_cross = pressure[idx_at_cross]
-            
-            # Use smart positioning
-            data_points = list(zip(vdotn, pressure))
-            time_label = format_time_label(v_cross)
-            xytext, ha, va = smart_label_position(ax1, (0, p_at_cross), time_label, 
-                                                ax1_labels, data_points)
-            ax1_labels.append(xytext)
-            
-            ax1.annotate(time_label, 
-                       xy=(0, p_at_cross), 
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-        
-        for p_cross in p_crossings:
-            t_idx = np.abs(display_times - p_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - p_cross)).argmin()
-            v_at_cross = vdotn[idx_at_cross]
-
-            # Use smart positioning
-            data_points = list(zip(vdotn, pressure))
-            time_label = format_time_label(p_cross)
-            xytext, ha, va = smart_label_position(ax1, (v_at_cross, 0), time_label,
-                                                ax1_labels, data_points)
-            ax1_labels.append(xytext)
-
-            ax1.annotate(time_label,
-                       xy=(v_at_cross, 0),
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-
-        ax1.set_xlim(-v_max, v_max)
-        ax1.set_ylim(-p_max, p_max)
-        ax1.set_xlabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax1.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax1.set_title(f'Total Pressure vs v⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax1.grid(True, alpha=0.3)
-        # Format tick labels
-        ax1.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
-            label.set_fontweight('bold')
-
-        # 2. Plot p vs a
-        ax2 = fig.add_subplot(gs[i, 1])
-        scatter2 = ax2.scatter(adotn, pressure, c=display_times, cmap=custom_cmap, norm=norm)
-        ax2.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-
-        # Mark the zero crossings in the p vs a plot
-        for a_cross in a_crossings:
-            t_idx = np.abs(display_times - a_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - a_cross)).argmin()
-            p_at_cross = pressure[idx_at_cross]
-            
-            # Use smart positioning
-            data_points = list(zip(adotn, pressure))
-            time_label = format_time_label(a_cross)
-            xytext, ha, va = smart_label_position(ax2, (0, p_at_cross), time_label, 
-                                                ax2_labels, data_points)
-            ax2_labels.append(xytext)
-            
-            ax2.annotate(time_label, 
-                       xy=(0, p_at_cross), 
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='red', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-        
-        for p_cross in p_crossings:
-            t_idx = np.abs(display_times - p_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - p_cross)).argmin()
-            a_at_cross = adotn[idx_at_cross]
-
-            # Use smart positioning
-            data_points = list(zip(adotn, pressure))
-            time_label = format_time_label(p_cross)
-            xytext, ha, va = smart_label_position(ax2, (a_at_cross, 0), time_label,
-                                                ax2_labels, data_points)
-            ax2_labels.append(xytext)
-
-            ax2.annotate(time_label,
-                       xy=(a_at_cross, 0),
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='blue', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-
-        ax2.set_xlim(-a_max, a_max)
-        ax2.set_ylim(-p_max, p_max)
-        ax2.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax2.set_ylabel('Total Pressure (Pa)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax2.set_title(f'Total Pressure vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax2.grid(True, alpha=0.3)
-        # Format tick labels
-        ax2.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax2.get_xticklabels() + ax2.get_yticklabels():
-            label.set_fontweight('bold')
-
-        # 3. Plot v vs a
-        ax3 = fig.add_subplot(gs[i, 2])
-        scatter3 = ax3.scatter(adotn, vdotn, c=display_times, cmap=custom_cmap, norm=norm)
-        ax3.axvline(x=0, color='k', linestyle='--', alpha=0.5)
-        ax3.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-
-        # Mark the zero crossings in the v vs a plot
-        for v_cross in v_crossings:
-            t_idx = np.abs(display_times - v_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - v_cross)).argmin()
-            a_at_cross = adotn[idx_at_cross]
-
-            # Use smart positioning
-            data_points = list(zip(adotn, vdotn))
-            time_label = format_time_label(v_cross)
-            xytext, ha, va = smart_label_position(ax3, (a_at_cross, 0), time_label,
-                                                ax3_labels, data_points)
-            ax3_labels.append(xytext)
-
-            ax3.annotate(time_label,
-                       xy=(a_at_cross, 0),
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='green', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-
-        for a_cross in a_crossings:
-            t_idx = np.abs(display_times - a_cross).argmin()
-            # Add a timestamp label to the marker
-            idx_at_cross = (np.abs(display_times - a_cross)).argmin()
-            v_at_cross = vdotn[idx_at_cross]
-            
-            # Use smart positioning
-            data_points = list(zip(adotn, vdotn))
-            time_label = format_time_label(a_cross)
-            xytext, ha, va = smart_label_position(ax3, (0, v_at_cross), time_label, 
-                                                ax3_labels, data_points)
-            ax3_labels.append(xytext)
-            
-            ax3.annotate(time_label, 
-                       xy=(0, v_at_cross), 
-                       xytext=xytext,
-                       arrowprops=dict(arrowstyle="->", color='purple', lw=1.5),
-                       color='black', fontsize=11, fontweight='bold',
-                       ha=ha, va=va)
-        
-        ax3.set_xlim(-a_max, a_max)
-        ax3.set_ylim(-v_max, v_max)
-        ax3.set_xlabel('a⃗·n⃗ (mm/s²)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax3.set_ylabel('v⃗·n⃗ (mm/s)', fontsize=LABEL_SIZE, fontweight='bold')
-        ax3.set_title(f'v⃗·n⃗ vs a⃗·n⃗\n{loc["description"]}', fontsize=TITLE_SIZE, fontweight='bold')
-        ax3.grid(True, alpha=0.3)
-        # Format tick labels
-        ax3.tick_params(axis='both', which='major', labelsize=LABEL_SIZE)
-        for label in ax3.get_xticklabels() + ax3.get_yticklabels():
-            label.set_fontweight('bold')
-    
-    # Add a colorbar for time
-    display_time_max = max([data['display_times'].max() for data in processed_data.values()])
-    display_time_min = min([data['display_times'].min() for data in processed_data.values()])
-    cax = fig.add_axes([0.92, 0.1, 0.02, 0.8])  # [left, bottom, width, height]
-    cbar = plt.colorbar(scatter1, cax=cax)
-    cbar.set_label('Time (s)', fontsize=LABEL_SIZE * 1.1, fontweight='bold')
-
-    # Add breathing cycle timepoint markers on the colorbar
-    if breathing_cycle_s:
-        for label_key, label_text in [
-            ('inhale_start', 'Inhale Start'),
-            ('transition', 'Transition'),
-            ('exhale_end', 'Exhale End'),
-        ]:
-            t_orig = breathing_cycle_s.get(label_key)
-            if t_orig is not None:
-                t_display = t_orig if use_original_time else (t_orig - global_time_min)
-                if display_time_min <= t_display <= display_time_max:
-                    cbar.ax.axhline(y=t_display, color='black', linewidth=1.5, linestyle='--')
-                    cbar.ax.text(1.1, t_display, f'{label_text}\n({t_display:.3f}s)',
-                               transform=cbar.ax.get_yaxis_transform(),
-                               fontsize=7, va='center', ha='left')
-
-    # Add a note about the time mode and smoothing
-    if breathing_cycle_s:
-        bc_parts = []
-        for label_key, label_text in [('inhale_start', 'Inhale Start'), ('transition', 'Transition'), ('exhale_end', 'Exhale End')]:
-            t_orig = breathing_cycle_s.get(label_key)
-            if t_orig is not None:
-                t_display = t_orig if use_original_time else (t_orig - global_time_min)
-                bc_parts.append(f'{label_text}: {t_display:.3f}s')
-        bc_text = ', '.join(bc_parts)
-        if use_original_time:
-            note_text = f'Note: Using original timestamps. {bc_text}.\nData smoothed with moving average (window size: 20).'
-        else:
-            note_text = f'Note: Time normalized to start at 0s. Original data started at {global_time_min:.3f}s.\n{bc_text}. Data smoothed with moving average (window size: 20).'
-    elif use_original_time:
-        note_text = f'Note: Using original timestamps. Inhale-exhale transition at {display_inhale_exhale:.3f}s.\nData smoothed with moving average (window size: 20).'
-    else:
-        note_text = f'Note: Time has been normalized to start at 0s. Original data started at {global_time_min:.3f}s.\nInhale-exhale transition at {display_inhale_exhale:.3f}s. Data smoothed with moving average (window size: 20).'
-    fig.text(0.5, 0.01, note_text, fontsize=10, ha='center', va='bottom')
-
-    # Add overall title
-    fig.suptitle(f'Comparative Analysis of Pressure, Velocity and Acceleration\nSymmetric Plots Centered at Origin (Smoothed Version with Zero-Crossing Markers)',
-                 fontsize=16, fontweight='bold', y=0.98)
-
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 0.9, 0.95])  # [left, bottom, right, top]
-
-    # Save to main PDF if provided
-    if pdf is not None:
-        pdf.savefig(fig)
-
-    # Save a standalone PDF version to pdfs directory
-    time_suffix = "_origtime" if use_original_time else ""
-    filter_suffix = "_filtered" if filter_breathing_cycle else ""
-    if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_smooth_markers{time_suffix}{filter_suffix}.pdf"
-        plt.savefig(standalone_filename, bbox_inches='tight')
-        print(f"Saved standalone PDF: {standalone_filename}")
-    else:
-        standalone_filename = f"{subject_name}_symmetric_smooth_markers{time_suffix}{filter_suffix}.pdf"
-        plt.savefig(standalone_filename, bbox_inches='tight')
-        print(f"Saved standalone PDF: {standalone_filename}")
-
-    plt.close()
-    print("Smoothed symmetric comparison panel with markers completed.")
 
 
 def create_airway_surface_analysis_plot(df, subject_name, description, patch_number, face_index, pdf, output_dir=None, smoothing_window=20):
@@ -3682,6 +2953,166 @@ def create_original_flow_profile_plot(subject_name, hdf5_file_path, results_dir,
     plt.close()
 
     return standalone_filename
+
+
+def create_flow_profile_comparison_plot(subject_name, hdf5_file_path, results_dir, output_dir=None, pdfs_dir=None):
+    """
+    Create a flow profile comparison plot showing original full-range flow profile vs
+    filtered/normalized breathing cycle, with time mapping annotations.
+
+    Layout: Two subplots stacked vertically, sharing y-axis scale.
+    - Top: Original full-range flow profile (raw CFD time on x-axis)
+    - Bottom: Filtered breathing cycle (normalized time starting at 0)
+
+    Arguments:
+        subject_name: Name of the subject
+        hdf5_file_path: Path to the HDF5 file containing flow profile data
+        results_dir: Path to results directory containing metadata.json
+        output_dir: Directory to save PNG files (optional)
+        pdfs_dir: Directory to save PDF files (optional)
+    """
+    print(f"\nGenerating flow profile comparison plot for {subject_name}...")
+
+    from data_processing.trajectory import get_flow_profile, has_flow_profile
+
+    if not has_flow_profile(hdf5_file_path):
+        print(f"No flow profile found in HDF5 for {subject_name}, skipping comparison plot")
+        return
+
+    flow_df = get_flow_profile(hdf5_file_path)
+    if flow_df is None:
+        print(f"Could not read flow profile from HDF5 for {subject_name}")
+        return
+
+    flow_times = flow_df['time (s)'].values
+    flow_rates = flow_df['Massflowrate (kg/s)'].values
+
+    # Read breathing cycle metadata
+    metadata_path = Path(results_dir) / f"{subject_name}_metadata.json"
+    if not metadata_path.exists():
+        print(f"No metadata.json found for {subject_name}, skipping comparison plot")
+        return
+
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    breathing_cycle = metadata.get('breathing_cycle', {})
+    zero_crossings_ms = breathing_cycle.get('zero_crossings_ms', [])
+
+    if len(zero_crossings_ms) < 3:
+        print(f"Not enough zero crossings in metadata (need 3, got {len(zero_crossings_ms)})")
+        return
+
+    zero_times = [t / 1000.0 for t in zero_crossings_ms[:3]]  # [start, transition, end]
+
+    # Convert from kg/s to L/min
+    air_density = 1.225  # kg/m³
+    conversion_factor = (1 / air_density) * 1000 * 60
+    flow_rates_lpm = flow_rates * conversion_factor
+
+    # Extract the breathing cycle data
+    start_idx = np.searchsorted(flow_times, zero_times[0])
+    end_idx = np.searchsorted(flow_times, zero_times[2])
+    cycle_times = flow_times[start_idx:end_idx+1]
+    cycle_rates_lpm = flow_rates_lpm[start_idx:end_idx+1]
+    normalized_times = cycle_times - cycle_times[0]
+
+    # Create the comparison plot
+    fig, (ax_top, ax_bottom) = plt.subplots(2, 1, figsize=(14, 12), gridspec_kw={'hspace': 0.4})
+
+    # Shared y-axis scale
+    y_min = min(flow_rates_lpm.min(), cycle_rates_lpm.min()) * 1.1
+    y_max = max(flow_rates_lpm.max(), cycle_rates_lpm.max()) * 1.1
+
+    # --- Top subplot: Original full-range flow profile ---
+    ax_top.plot(flow_times, flow_rates_lpm, 'b-', linewidth=1.5, label='Raw Flow Rate')
+    ax_top.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+    ax_top.set_ylim(y_min, y_max)
+
+    # Mark breathing cycle boundaries
+    colors_bc = ['green', 'red', 'green']
+    labels_bc = ['Cycle Start', 'Inhale→Exhale', 'Cycle End']
+    for i, t_cross in enumerate(zero_times):
+        color = colors_bc[i]
+        label = labels_bc[i]
+        ax_top.axvline(x=t_cross, color=color, linestyle='-', linewidth=2, alpha=0.7,
+                       label=f'{label} ({t_cross:.3f}s)')
+
+    # Shade the extracted cycle region
+    ax_top.axvspan(zero_times[0], zero_times[2], alpha=0.1, color='blue', label='Extracted Cycle')
+
+    ax_top.set_xlabel('CFD Simulation Time (s)', fontsize=14, fontweight='bold')
+    ax_top.set_ylabel('Flow Rate (L/min)', fontsize=14, fontweight='bold')
+    ax_top.set_title(f'Original Flow Profile (Full CFD Time Range) - {subject_name}', fontsize=14, fontweight='bold')
+    ax_top.grid(True, alpha=0.3)
+    ax_top.legend(loc='upper right', fontsize=9)
+    ax_top.tick_params(axis='both', which='major', labelsize=11)
+    for label in ax_top.get_xticklabels() + ax_top.get_yticklabels():
+        label.set_fontweight('bold')
+
+    # --- Bottom subplot: Filtered breathing cycle (normalized time) ---
+    ax_bottom.plot(normalized_times, cycle_rates_lpm, 'b-', linewidth=2, label='Breathing Cycle')
+    ax_bottom.axhline(y=0, color='k', linestyle='--', alpha=0.5)
+    ax_bottom.set_ylim(y_min, y_max)
+
+    # Mark transition
+    transition_normalized = zero_times[1] - zero_times[0]
+    ax_bottom.axvline(x=0, color='green', linestyle='-', linewidth=2, alpha=0.7, label=f'Cycle Start (0.000s)')
+    ax_bottom.axvline(x=transition_normalized, color='red', linestyle='-', linewidth=2, alpha=0.7,
+                      label=f'Inhale→Exhale ({transition_normalized:.3f}s)')
+    cycle_end_normalized = zero_times[2] - zero_times[0]
+    ax_bottom.axvline(x=cycle_end_normalized, color='green', linestyle='-', linewidth=2, alpha=0.7,
+                      label=f'Cycle End ({cycle_end_normalized:.3f}s)')
+
+    ax_bottom.set_xlabel('Analysis Time (s, normalized to start at 0)', fontsize=14, fontweight='bold')
+    ax_bottom.set_ylabel('Flow Rate (L/min)', fontsize=14, fontweight='bold')
+    ax_bottom.set_title(f'Filtered Breathing Cycle (Normalized Time) - {subject_name}', fontsize=14, fontweight='bold')
+    ax_bottom.grid(True, alpha=0.3)
+    ax_bottom.legend(loc='upper right', fontsize=9)
+    ax_bottom.tick_params(axis='both', which='major', labelsize=11)
+    for label in ax_bottom.get_xticklabels() + ax_bottom.get_yticklabels():
+        label.set_fontweight('bold')
+
+    # --- Time mapping annotations between the two plots ---
+    mapping_points = [
+        ('Cycle Start', zero_times[0], 0.0),
+        ('Transition', zero_times[1], transition_normalized),
+        ('Cycle End', zero_times[2], cycle_end_normalized),
+    ]
+
+    # Add a text box between the two subplots showing the time mapping
+    mapping_lines = []
+    for name, t_orig, t_norm in mapping_points:
+        mapping_lines.append(f'{name}: CFD {t_orig:.3f}s = Analysis {t_norm:.3f}s')
+    mapping_text = '  |  '.join(mapping_lines)
+    fig.text(0.5, 0.48, mapping_text,
+             fontsize=10, ha='center', va='center',
+             bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow', edgecolor='gray', alpha=0.9),
+             fontweight='bold')
+
+    # Add overall info
+    fig.text(0.5, 0.01,
+             f'Time offset: {zero_times[0]:.3f}s | Full range: {flow_times[0]:.3f}s - {flow_times[-1]:.3f}s | '
+             f'Cycle duration: {cycle_end_normalized:.3f}s',
+             fontsize=10, ha='center', va='bottom')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+
+    # Save PDF
+    if pdfs_dir:
+        pdf_filename = pdfs_dir / f"{subject_name}_flow_profile_comparison.pdf"
+        plt.savefig(pdf_filename, bbox_inches='tight')
+        print(f"Saved PDF: {pdf_filename}")
+
+    # Save PNG
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True)
+        png_filename = output_dir / f"{subject_name}_flow_profile_comparison.png"
+        plt.savefig(png_filename, dpi=300, bbox_inches='tight')
+        print(f"Saved PNG: {png_filename}")
+
+    plt.close()
 
 
 def detect_available_subjects() -> List[str]:
@@ -5718,35 +5149,15 @@ def main(overwrite_existing: bool = False,
             print(f"Creating symmetric comparison panels for {subject_name} with {len(locations_for_panel)} locations...")
 
             # === System A: Symmetric Panels (single-page, all locations) ===
-            # A1. symmetric_raw — raw data, no markers
+            # A1. symmetric_raw
             create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
+            # A1t. symmetric_raw_timemap
+            create_symmetric_comparison_panel_clean(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, timemap=True)
 
-            # A2. symmetric_raw_markers — raw data, with zero-crossing markers
-            create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
-
-            # A3. symmetric_smooth — smoothed data, no markers
+            # A2. symmetric_smooth
             create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
-
-            # A4. symmetric_smooth_markers — smoothed, markers, normalized time
-            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s)
-
-            # A5. symmetric_smooth_markers_origtime — smoothed, markers, original time
-            create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s)
-
-            # Filtered breathing cycle versions of all symmetric panels
-            if breathing_cycle_s:
-                print(f"\nGenerating filtered breathing cycle symmetric panels...")
-                # A1f. symmetric_raw_filtered
-                create_symmetric_comparison_panel_clean(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                # A2f. symmetric_raw_markers_filtered
-                create_symmetric_comparison_panel(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                # A3f. symmetric_smooth_filtered
-                create_symmetric_comparison_panel_smooth(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                # A4f. symmetric_smooth_markers_filtered
-                create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                # A5f. symmetric_smooth_markers_origtime_filtered
-                create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                print(f"Filtered breathing cycle symmetric panels completed.")
+            # A2t. symmetric_smooth_timemap
+            create_symmetric_comparison_panel_smooth(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, timemap=True)
 
             print(f"Symmetric comparison panels completed.")
 
@@ -5764,30 +5175,15 @@ def main(overwrite_existing: bool = False,
 
                 # Create CFD analysis panels if we have data
                 if single_point_dfs or patch_dfs:
-                    # B1. multipage_shared — shared scale, no markers
+                    # B1. multipage_shared
                     create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
+                    # B1t. multipage_shared_timemap
+                    create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, timemap=True)
 
-                    # B2. multipage_shared_markers — shared scale, with markers
-                    create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
-
-                    # B3. multipage_detail — per-subplot scale, no markers
+                    # B2. multipage_detail
                     create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
-
-                    # B4. multipage_detail_markers + multipage_detail_markers_origtime
-                    create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
-
-                    # Filtered breathing cycle versions of all multipage panels
-                    if breathing_cycle_s:
-                        print(f"\nGenerating filtered breathing cycle multi-page panels...")
-                        # B1f. multipage_shared_filtered
-                        create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
-                        # B2f. multipage_shared_markers_filtered
-                        create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
-                        # B3f. multipage_detail_filtered
-                        create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
-                        # B4f. multipage_detail_markers_filtered + multipage_detail_markers_origtime_filtered
-                        create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
-                        print(f"Filtered breathing cycle multi-page panels completed.")
+                    # B2t. multipage_detail_timemap
+                    create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, timemap=True)
 
                     print(f"Multi-page CFD analysis panels completed.")
                 else:
@@ -5803,9 +5199,10 @@ def main(overwrite_existing: bool = False,
     print(f"- Individual PNG files in {results_dir}/figures/ directory")
     print(f"- Individual CSV files in {results_dir}/tracked_points/ directory")
     
-    # Generate flow profile visualizations (both clean and original)
+    # Generate flow profile visualizations (clean, original, and comparison)
     create_clean_flow_profile_plot(subject_name, hdf5_file_path, results_dir, figures_dir, pdfs_dir)
     create_original_flow_profile_plot(subject_name, hdf5_file_path, results_dir, figures_dir, pdfs_dir)
+    create_flow_profile_comparison_plot(subject_name, hdf5_file_path, results_dir, figures_dir, pdfs_dir)
     
     # Generate interactive 3D patch visualization
     if enable_patch_visualization:
