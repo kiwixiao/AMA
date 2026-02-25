@@ -91,7 +91,6 @@ try:
         create_cfd_analysis_3x3_panel,
         create_cfd_analysis_3x3_panel_with_markers,
         create_cfd_analysis_3x3_panel_original_scale,
-        create_cfd_analysis_3x3_panel_with_markers_original_scale,
         create_cfd_analysis_3x3_panel_with_markers_both_time_versions,
         load_cfd_data_for_analysis
     )
@@ -2027,11 +2026,11 @@ def create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir=Non
     # Save a standalone PDF version to pdfs directory
     suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_clean{suffix}.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_raw{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_clean{suffix}.pdf"
+        standalone_filename = f"{subject_name}_symmetric_raw{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
 
@@ -2343,11 +2342,11 @@ def create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir=None, loc
     # Save a standalone PDF version to pdfs directory
     suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel{suffix}.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_raw_markers{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel{suffix}.pdf"
+        standalone_filename = f"{subject_name}_symmetric_raw_markers{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
 
@@ -2646,11 +2645,11 @@ def create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir=No
     # Save a standalone PDF version to pdfs directory
     suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smooth{suffix}.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_smooth{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_smooth{suffix}.pdf"
+        standalone_filename = f"{subject_name}_symmetric_smooth{suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
 
@@ -3068,14 +3067,14 @@ def create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf
         pdf.savefig(fig)
 
     # Save a standalone PDF version to pdfs directory
-    time_suffix = "_original_time" if use_original_time else "_normalized_time"
+    time_suffix = "_origtime" if use_original_time else ""
     filter_suffix = "_filtered" if filter_breathing_cycle else ""
     if pdfs_dir:
-        standalone_filename = pdfs_dir / f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}{filter_suffix}.pdf"
+        standalone_filename = pdfs_dir / f"{subject_name}_symmetric_smooth_markers{time_suffix}{filter_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
     else:
-        standalone_filename = f"{subject_name}_3x3_panel_smoothed_with_markers{time_suffix}{filter_suffix}.pdf"
+        standalone_filename = f"{subject_name}_symmetric_smooth_markers{time_suffix}{filter_suffix}.pdf"
         plt.savefig(standalone_filename, bbox_inches='tight')
         print(f"Saved standalone PDF: {standalone_filename}")
 
@@ -5717,33 +5716,43 @@ def main(overwrite_existing: bool = False,
         # Create symmetric comparison panel if we have data
         if len(dfs) >= 1:
             print(f"Creating symmetric comparison panels for {subject_name} with {len(locations_for_panel)} locations...")
-            # 1. Clean version (no markers)
+
+            # === System A: Symmetric Panels (single-page, all locations) ===
+            # A1. symmetric_raw — raw data, no markers
             create_symmetric_comparison_panel_clean(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
-            # 2. Detailed version (with zero-crossing markers)
+            # A2. symmetric_raw_markers — raw data, with zero-crossing markers
             create_symmetric_comparison_panel(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
-            # 3. Smoothed version (with moving average)
+            # A3. symmetric_smooth — smoothed data, no markers
             create_symmetric_comparison_panel_smooth(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s)
 
-            # 4. Smoothed version with zero-crossing markers (normalized time - starts at 0)
+            # A4. symmetric_smooth_markers — smoothed, markers, normalized time
             create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, pdf, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s)
 
-            # 5. Smoothed version with zero-crossing markers (original time - for traceability)
+            # A5. symmetric_smooth_markers_origtime — smoothed, markers, original time
             create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s)
 
-            # 6. Filtered breathing cycle versions (only within inhale_start to exhale_end)
+            # Filtered breathing cycle versions of all symmetric panels
             if breathing_cycle_s:
-                print(f"\nGenerating filtered breathing cycle panels...")
+                print(f"\nGenerating filtered breathing cycle symmetric panels...")
+                # A1f. symmetric_raw_filtered
+                create_symmetric_comparison_panel_clean(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                # A2f. symmetric_raw_markers_filtered
+                create_symmetric_comparison_panel(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                # A3f. symmetric_smooth_filtered
+                create_symmetric_comparison_panel_smooth(dfs, subject_name, None, pdfs_dir, locations_for_panel, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                # A4f. symmetric_smooth_markers_filtered
                 create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=False, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
+                # A5f. symmetric_smooth_markers_origtime_filtered
                 create_symmetric_comparison_panel_smooth_with_markers(dfs, subject_name, None, pdfs_dir, locations_for_panel, use_original_time=True, breathing_cycle_s=breathing_cycle_s, filter_breathing_cycle=True)
-                print(f"Filtered breathing cycle panels completed.")
+                print(f"Filtered breathing cycle symmetric panels completed.")
 
             print(f"Symmetric comparison panels completed.")
 
-            # 7. CFD Analysis 3x3 panels
+            # === System B: Multi-Page Panels (single points + patch radii + comparison) ===
             if CFD_ANALYSIS_AVAILABLE:
-                print(f"Creating CFD Analysis 3x3 panels for {subject_name}...")
+                print(f"Creating multi-page CFD analysis panels for {subject_name}...")
 
                 # Load both single point and patch data for CFD analysis
                 single_point_dfs, patch_dfs = load_cfd_data_for_analysis(
@@ -5755,26 +5764,32 @@ def main(overwrite_existing: bool = False,
 
                 # Create CFD analysis panels if we have data
                 if single_point_dfs or patch_dfs:
-                    # Create CFD analysis 3x3 panel (smoothed, no markers) - shared scale
+                    # B1. multipage_shared — shared scale, no markers
                     create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
-                    # Create CFD analysis 3x3 panel with markers (smoothed, with markers) - shared scale
+                    # B2. multipage_shared_markers — shared scale, with markers
                     create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
-                    # Create CFD analysis 3x3 panels with original data scale (each subplot auto-scaled)
+                    # B3. multipage_detail — per-subplot scale, no markers
                     create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
-                    create_cfd_analysis_3x3_panel_with_markers_original_scale(single_point_dfs, patch_dfs, subject_name, pdf, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
-                    # Create CFD analysis 3x3 panels with both normalized and original TIME versions
+                    # B4. multipage_detail_markers + multipage_detail_markers_origtime
                     create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s)
 
-                    # Create filtered breathing cycle versions of 3x3 panels
+                    # Filtered breathing cycle versions of all multipage panels
                     if breathing_cycle_s:
-                        print(f"\nGenerating filtered breathing cycle 3x3 panels...")
+                        print(f"\nGenerating filtered breathing cycle multi-page panels...")
+                        # B1f. multipage_shared_filtered
+                        create_cfd_analysis_3x3_panel(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
+                        # B2f. multipage_shared_markers_filtered
+                        create_cfd_analysis_3x3_panel_with_markers(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
+                        # B3f. multipage_detail_filtered
+                        create_cfd_analysis_3x3_panel_original_scale(single_point_dfs, patch_dfs, subject_name, None, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
+                        # B4f. multipage_detail_markers_filtered + multipage_detail_markers_origtime_filtered
                         create_cfd_analysis_3x3_panel_with_markers_both_time_versions(single_point_dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=True)
-                        print(f"Filtered breathing cycle 3x3 panels completed.")
+                        print(f"Filtered breathing cycle multi-page panels completed.")
 
-                    print(f"CFD Analysis 3x3 panels completed (shared scale + original data scale + time versions).")
+                    print(f"Multi-page CFD analysis panels completed.")
                 else:
                     print(f"Warning: No CFD data found for analysis")
             else:

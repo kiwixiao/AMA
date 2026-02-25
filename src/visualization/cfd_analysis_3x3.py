@@ -1,11 +1,17 @@
 """
-CFD Analysis 3x3 Panel Visualizations
+CFD Analysis Multi-Page Panel Visualizations
 
-This module creates multi-page 3x3 panel visualizations for CFD analysis results:
-1. cfd_analysis_3x3.pdf - Smoothed lines, symmetric axis, no zero-crossing markers
-2. cfd_analysis_3x3_with_markers.pdf - Smoothed lines with zero-crossing markers, symmetric axis
+This module creates multi-page 3x3 panel visualizations for CFD analysis results.
+Each function generates both full-data and filtered (breathing cycle only) versions.
 
-Structure:
+Output files use the 'multipage_' prefix:
+- multipage_shared.pdf / multipage_shared_filtered.pdf - Shared scale, no markers
+- multipage_shared_markers.pdf / multipage_shared_markers_filtered.pdf - Shared scale, with markers
+- multipage_detail.pdf / multipage_detail_filtered.pdf - Per-subplot scale, no markers
+- multipage_detail_markers.pdf / multipage_detail_markers_filtered.pdf - Per-subplot, markers, normalized time
+- multipage_detail_markers_origtime.pdf / multipage_detail_markers_origtime_filtered.pdf - Per-subplot, markers, original time
+
+Structure per PDF:
 - Page 1: Single point data (3x3 layout)
 - Page 2+: Patch mean values for each radius (3x3 layout per page)
 """
@@ -39,16 +45,17 @@ def create_single_3x3_page(data_dict, subject_name, page_title, pdf, with_marker
         use_original_time: If True, show original timestamps on X-axis instead of normalized from 0
         breathing_cycle_s: Optional dict with keys 'inhale_start', 'transition', 'exhale_end' in seconds
     """
-    # Create figure with 3x3 layout
-    fig = plt.figure(figsize=(20, 20))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
-
     # Dynamically build locations from whatever keys are in the data
     locations = []
     for key in data_dict.keys():
         # Convert key to display name (capitalize, replace underscores with spaces)
         description = key.replace('_', ' ').title()
         locations.append({'key': key, 'description': description})
+
+    # Create figure with dynamic Nx3 layout based on number of locations
+    n_rows = len(locations)
+    fig = plt.figure(figsize=(20, 6 * n_rows + 2))
+    gs = fig.add_gridspec(n_rows, 3, hspace=0.3, wspace=0.3)
 
     # Find mutual ranges across all locations
     v_max = max([data['v_max'] for data in data_dict.values()])
@@ -372,42 +379,18 @@ def process_data_for_page(dfs_dict, is_patch=False, radius_key=None, use_origina
         description = key.replace('_', ' ').title()
         locations.append({'key': key, 'description': description})
     
-    # Find global time minimum
-    global_time_min = float('inf')
-    for loc in locations:
-        if loc['key'] in dfs_dict:
-            if is_patch and radius_key:
-                if radius_key in dfs_dict[loc['key']]:
-                    df = dfs_dict[loc['key']][radius_key]
-                    times = df['Time (s)'].values
-                    global_time_min = min(global_time_min, times.min())
-            else:
-                df = dfs_dict[loc['key']]
-                times = df['Time (s)'].values
-                global_time_min = min(global_time_min, times.min())
-    
-    # Process each location
-    processed_data = {}
-    v_max_global = 0
-    a_max_global = 0
-    p_max_global = 0
-    
+    # Apply breathing cycle filter to all DataFrames first (before computing global_time_min)
+    # This ensures time normalization uses the filtered data range, matching main.py behavior
+    filtered_dfs_dict = {}
     for loc in locations:
         if loc['key'] not in dfs_dict:
             continue
-            
-        # Get the appropriate DataFrame
         if is_patch and radius_key:
             if radius_key not in dfs_dict[loc['key']]:
                 continue
             df = dfs_dict[loc['key']][radius_key]
-            # Use patch mean columns if available
-            vdotn_col = 'VdotN_Mean' if 'VdotN_Mean' in df.columns else 'VdotN'
-            pressure_col = 'Pressure_Mean (Pa)' if 'Pressure_Mean (Pa)' in df.columns else 'Total Pressure (Pa)'
         else:
             df = dfs_dict[loc['key']]
-            vdotn_col = 'VdotN'
-            pressure_col = 'Total Pressure (Pa)'
 
         # Filter to breathing cycle range if requested
         if filter_to_breathing_cycle and breathing_cycle_s:
@@ -417,6 +400,35 @@ def process_data_for_page(dfs_dict, is_patch=False, radius_key=None, use_origina
                 df = df[(df['Time (s)'] >= t_start) & (df['Time (s)'] <= t_end)]
                 if len(df) == 0:
                     continue
+
+        filtered_dfs_dict[loc['key']] = df
+
+    # Find global time minimum from (potentially filtered) data
+    global_time_min = float('inf')
+    for key, df in filtered_dfs_dict.items():
+        times = df['Time (s)'].values
+        global_time_min = min(global_time_min, times.min())
+
+    # Process each location
+    processed_data = {}
+    v_max_global = 0
+    a_max_global = 0
+    p_max_global = 0
+
+    for loc in locations:
+        if loc['key'] not in filtered_dfs_dict:
+            continue
+
+        df = filtered_dfs_dict[loc['key']]
+
+        # Determine column names
+        if is_patch and radius_key:
+            # Use patch mean columns if available
+            vdotn_col = 'VdotN_Mean' if 'VdotN_Mean' in df.columns else 'VdotN'
+            pressure_col = 'Pressure_Mean (Pa)' if 'Pressure_Mean (Pa)' in df.columns else 'Total Pressure (Pa)'
+        else:
+            vdotn_col = 'VdotN'
+            pressure_col = 'Total Pressure (Pa)'
 
         # Get the data
         times = df['Time (s)'].values
@@ -505,99 +517,139 @@ def process_data_for_page(dfs_dict, is_patch=False, radius_key=None, use_origina
     return processed_data
 
 
-def create_cfd_analysis_3x3_panel(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None):
+def create_cfd_analysis_3x3_panel(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None, filter_to_breathing_cycle=False):
     """
     Create multi-page CFD analysis 3x3 panels (smoothed, no zero-crossing markers).
 
     Page 1: Single point data
     Page 2+: Patch mean data for each radius
+
+    When pdf is provided, pages are added to it. A standalone PDF is always created in pdfs_dir.
     """
-    print(f"\nGenerating CFD Analysis 3x3 Panel (multi-page, smoothed, no markers)...")
+    filter_text = " (filtered)" if filter_to_breathing_cycle else ""
+    print(f"\nGenerating CFD Analysis 3x3 Panel (multi-page, smoothed, no markers){filter_text}...")
+
+    suffix = "_filtered" if filter_to_breathing_cycle else ""
+
+    # Determine which PDF targets to write to
+    pdf_targets = []
+    standalone_pdf = None
+    standalone_path = None
+
+    if pdfs_dir:
+        standalone_path = pdfs_dir / f'{subject_name}_multipage_shared{suffix}.pdf'
+        standalone_pdf = PdfPages(standalone_path)
+        pdf_targets.append(standalone_pdf)
+    if pdf is not None:
+        pdf_targets.append(pdf)
+
+    if not pdf_targets:
+        print("Warning: No PDF target available, skipping panel generation")
+        return
 
     # Page 1: Single point data
     if dfs:
         print("Creating Page 1: Single Point Data")
-        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
+        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
         if single_point_data:
-            create_single_3x3_page(single_point_data, subject_name, "Single Point Data", pdf, with_markers=False, breathing_cycle_s=breathing_cycle_s)
+            for target in pdf_targets:
+                create_single_3x3_page(single_point_data, subject_name, "Single Point Data", target, with_markers=False, breathing_cycle_s=breathing_cycle_s)
 
     # Page 2+: Patch data for each radius
     if patch_dfs:
-        # Get all available radii
         all_radii = set()
         for location_data in patch_dfs.values():
             all_radii.update(location_data.keys())
-
-        # Sort radii for consistent ordering
         sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
 
         for radius_key in sorted_radii:
             print(f"Creating Page: Patch Mean Data ({radius_key})")
-            patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s)
+            patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
             if patch_data:
                 page_title = f"Patch Mean Data ({radius_key})"
-                create_single_3x3_page(patch_data, subject_name, page_title, pdf, with_markers=False, breathing_cycle_s=breathing_cycle_s)
+                for target in pdf_targets:
+                    create_single_3x3_page(patch_data, subject_name, page_title, target, with_markers=False, breathing_cycle_s=breathing_cycle_s)
 
     # Add Point-Patch Comparison Page
     if dfs and patch_dfs:
         print("Creating Point-Patch Comparison Page")
-        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
-        create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir)
+        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
+        for target in pdf_targets:
+            create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, target, pdfs_dir)
 
-    # Save standalone PDF
-    if pdfs_dir:
-        print(f"Saved to: {pdfs_dir / f'{subject_name}_cfd_analysis_3x3.pdf'}")
-    else:
-        print(f"Saved to: {subject_name}_cfd_analysis_3x3.pdf")
+    # Close standalone PDF
+    if standalone_pdf is not None:
+        standalone_pdf.close()
+        print(f"Saved to: {standalone_path}")
 
 
-def create_cfd_analysis_3x3_panel_with_markers(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None):
+def create_cfd_analysis_3x3_panel_with_markers(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None, filter_to_breathing_cycle=False):
     """
     Create multi-page CFD analysis 3x3 panels (smoothed, with zero-crossing markers).
 
     Page 1: Single point data
     Page 2+: Patch mean data for each radius
+
+    When pdf is provided, pages are added to it. A standalone PDF is always created in pdfs_dir.
     """
-    print(f"\nGenerating CFD Analysis 3x3 Panel with Markers (multi-page, smoothed, with zero-crossing markers)...")
+    filter_text = " (filtered)" if filter_to_breathing_cycle else ""
+    print(f"\nGenerating CFD Analysis 3x3 Panel with Markers (multi-page, smoothed, with zero-crossing markers){filter_text}...")
+
+    suffix = "_filtered" if filter_to_breathing_cycle else ""
+
+    # Determine which PDF targets to write to
+    pdf_targets = []
+    standalone_pdf = None
+    standalone_path = None
+
+    if pdfs_dir:
+        standalone_path = pdfs_dir / f'{subject_name}_multipage_shared_markers{suffix}.pdf'
+        standalone_pdf = PdfPages(standalone_path)
+        pdf_targets.append(standalone_pdf)
+    if pdf is not None:
+        pdf_targets.append(pdf)
+
+    if not pdf_targets:
+        print("Warning: No PDF target available, skipping panel generation")
+        return
 
     # Page 1: Single point data
     if dfs:
         print("Creating Page 1: Single Point Data (with markers)")
-        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
+        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
         if single_point_data:
-            create_single_3x3_page(single_point_data, subject_name, "Single Point Data", pdf, with_markers=True, breathing_cycle_s=breathing_cycle_s)
+            for target in pdf_targets:
+                create_single_3x3_page(single_point_data, subject_name, "Single Point Data", target, with_markers=True, breathing_cycle_s=breathing_cycle_s)
 
     # Page 2+: Patch data for each radius
     if patch_dfs:
-        # Get all available radii
         all_radii = set()
         for location_data in patch_dfs.values():
             all_radii.update(location_data.keys())
-
-        # Sort radii for consistent ordering
         sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
 
         for radius_key in sorted_radii:
             print(f"Creating Page: Patch Mean Data ({radius_key}) with markers")
-            patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s)
+            patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
             if patch_data:
                 page_title = f"Patch Mean Data ({radius_key})"
-                create_single_3x3_page(patch_data, subject_name, page_title, pdf, with_markers=True, breathing_cycle_s=breathing_cycle_s)
+                for target in pdf_targets:
+                    create_single_3x3_page(patch_data, subject_name, page_title, target, with_markers=True, breathing_cycle_s=breathing_cycle_s)
 
     # Add Point-Patch Comparison Page
     if dfs and patch_dfs:
         print("Creating Point-Patch Comparison Page")
-        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
-        create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, pdf, pdfs_dir)
+        single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
+        for target in pdf_targets:
+            create_point_patch_comparison_page(single_point_data, patch_dfs, subject_name, target, pdfs_dir)
 
-    # Save standalone PDF
-    if pdfs_dir:
-        print(f"Saved to: {pdfs_dir / f'{subject_name}_cfd_analysis_3x3_with_markers.pdf'}")
-    else:
-        print(f"Saved to: {subject_name}_cfd_analysis_3x3_with_markers.pdf")
+    # Close standalone PDF
+    if standalone_pdf is not None:
+        standalone_pdf.close()
+        print(f"Saved to: {standalone_path}")
 
 
-def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None):
+def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None, filter_to_breathing_cycle=False):
     """
     Create multi-page CFD analysis 3x3 panels with original data scale (each subplot uses its own range).
     Creates a SEPARATE PDF file for original data scale.
@@ -605,16 +657,19 @@ def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, p
     Page 1: Single point data
     Page 2+: Patch mean data for each radius
     """
-    print(f"\nGenerating CFD Analysis 3x3 Panel (Original Data Scale)...")
+    filter_text = " (filtered)" if filter_to_breathing_cycle else ""
+    print(f"\nGenerating CFD Analysis 3x3 Panel (Original Data Scale){filter_text}...")
+
+    suffix = "_filtered" if filter_to_breathing_cycle else ""
 
     # Create separate PDF file for original data scale
     if pdfs_dir:
-        pdf_path = pdfs_dir / f'{subject_name}_3x3_panel_original_data_scale.pdf'
+        pdf_path = pdfs_dir / f'{subject_name}_multipage_detail{suffix}.pdf'
         with PdfPages(pdf_path) as orig_pdf:
             # Page 1: Single point data
             if dfs:
                 print("Creating Page 1: Single Point Data (original scale)")
-                single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
+                single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
                 if single_point_data:
                     create_single_3x3_page(single_point_data, subject_name, "Single Point Data", orig_pdf,
                                            with_markers=False, original_data_scale=True, breathing_cycle_s=breathing_cycle_s)
@@ -628,7 +683,7 @@ def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, p
 
                 for radius_key in sorted_radii:
                     print(f"Creating Page: Patch Mean Data ({radius_key}) original scale")
-                    patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s)
+                    patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s, filter_to_breathing_cycle=filter_to_breathing_cycle)
                     if patch_data:
                         page_title = f"Patch Mean Data ({radius_key})"
                         create_single_3x3_page(patch_data, subject_name, page_title, orig_pdf,
@@ -637,53 +692,14 @@ def create_cfd_analysis_3x3_panel_original_scale(dfs, patch_dfs, subject_name, p
         print(f"Saved to: {pdf_path}")
 
 
-def create_cfd_analysis_3x3_panel_with_markers_original_scale(dfs, patch_dfs, subject_name, pdf, pdfs_dir=None, breathing_cycle_s=None):
-    """
-    Create multi-page CFD analysis 3x3 panels with markers and original data scale.
-    Creates a SEPARATE PDF file for original data scale with markers.
-
-    Page 1: Single point data
-    Page 2+: Patch mean data for each radius
-    """
-    print(f"\nGenerating CFD Analysis 3x3 Panel with Markers (Original Data Scale)...")
-
-    # Create separate PDF file for original data scale with markers
-    if pdfs_dir:
-        pdf_path = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_original_data_scale.pdf'
-        with PdfPages(pdf_path) as orig_pdf:
-            # Page 1: Single point data
-            if dfs:
-                print("Creating Page 1: Single Point Data (with markers, original scale)")
-                single_point_data = process_data_for_page(dfs, is_patch=False, breathing_cycle_s=breathing_cycle_s)
-                if single_point_data:
-                    create_single_3x3_page(single_point_data, subject_name, "Single Point Data", orig_pdf,
-                                           with_markers=True, original_data_scale=True, breathing_cycle_s=breathing_cycle_s)
-
-            # Page 2+: Patch data for each radius
-            if patch_dfs:
-                all_radii = set()
-                for location_data in patch_dfs.values():
-                    all_radii.update(location_data.keys())
-                sorted_radii = sorted(all_radii, key=lambda x: float(x.replace('mm', '')))
-
-                for radius_key in sorted_radii:
-                    print(f"Creating Page: Patch Mean Data ({radius_key}) with markers, original scale")
-                    patch_data = process_data_for_page(patch_dfs, is_patch=True, radius_key=radius_key, breathing_cycle_s=breathing_cycle_s)
-                    if patch_data:
-                        page_title = f"Patch Mean Data ({radius_key})"
-                        create_single_3x3_page(patch_data, subject_name, page_title, orig_pdf,
-                                               with_markers=True, original_data_scale=True, breathing_cycle_s=breathing_cycle_s)
-
-        print(f"Saved to: {pdf_path}")
-
 
 def create_cfd_analysis_3x3_panel_with_markers_both_time_versions(dfs, patch_dfs, subject_name, pdfs_dir, breathing_cycle_s=None, filter_to_breathing_cycle=False):
     """
     Create CFD analysis 3x3 panels with markers, generating BOTH normalized and original time versions.
 
     Outputs:
-        - {subject}_3x3_panel_with_markers_normalized_time.pdf (time starts at 0)
-        - {subject}_3x3_panel_with_markers_original_time.pdf (original timestamps)
+        - {subject}_multipage_detail_markers.pdf (time starts at 0)
+        - {subject}_multipage_detail_markers_origtime.pdf (original timestamps)
         If filter_to_breathing_cycle: adds _filtered suffix to filenames
     """
     if not pdfs_dir:
@@ -694,7 +710,7 @@ def create_cfd_analysis_3x3_panel_with_markers_both_time_versions(dfs, patch_dfs
 
     # Generate normalized time version (existing behavior - time starts at 0)
     print(f"\nGenerating CFD Analysis 3x3 Panel (Normalized Time{', Filtered' if filter_to_breathing_cycle else ''})...")
-    pdf_path_normalized = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_normalized_time{suffix}.pdf'
+    pdf_path_normalized = pdfs_dir / f'{subject_name}_multipage_detail_markers{suffix}.pdf'
     with PdfPages(pdf_path_normalized) as pdf:
         if dfs:
             print("Creating Page: Single Point Data (normalized time)")
@@ -722,7 +738,7 @@ def create_cfd_analysis_3x3_panel_with_markers_both_time_versions(dfs, patch_dfs
 
     # Generate original time version (original timestamps on X-axis)
     print(f"\nGenerating CFD Analysis 3x3 Panel (Original Time{', Filtered' if filter_to_breathing_cycle else ''})...")
-    pdf_path_original = pdfs_dir / f'{subject_name}_3x3_panel_with_markers_original_time{suffix}.pdf'
+    pdf_path_original = pdfs_dir / f'{subject_name}_multipage_detail_markers_origtime{suffix}.pdf'
     with PdfPages(pdf_path_original) as pdf:
         if dfs:
             print("Creating Page: Single Point Data (original time)")
